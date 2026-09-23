@@ -1,4 +1,4 @@
-name: "☁️ Generator Hub - Ringtone + Metadata (single workflow)"
+name: "☁️ Generator Hub - Ringtone + Image Studio + Metadata (single workflow)"
 run-name: "🎯 MODE: ${{ inputs.mode }}"
 
 on:
@@ -12,6 +12,7 @@ on:
         options:
           - ringtone
           - metadata
+          - image_studio
 
       image_queue_path:
         description: "📂 Firebase path to scan for images"
@@ -69,6 +70,20 @@ on:
         required: false
         default: ""
 
+      studio_timeout_minutes:
+        description: "🎨 [image_studio] Max panel session length in minutes (5–330; job hard limit is 360)"
+        required: false
+        default: "240"
+
+      studio_auto_metadata:
+        description: "🎨 [image_studio] After the session, run the Gemini-Web metadata job on distributed items"
+        required: false
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+
 jobs:
   generate-ringtones:
     if: github.event.inputs.mode == 'ringtone'
@@ -86,6 +101,12 @@ jobs:
           npm init -y
           npm install node-fetch@3 fluent-ffmpeg @ffmpeg-installer/ffmpeg playwright playwright-extra puppeteer-extra-plugin-stealth
           npx playwright install chromium --with-deps
+
+      - name: 🎛️ Install ffmpeg (required for silence trim + volume boost)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg
+          ffmpeg -version | head -n 1
 
       - name: 🖥️ Start Virtual Display (Xvfb)
         run: |
@@ -230,11 +251,42 @@ jobs:
           console.log(`📋 Auto-Generating: ${AUTO_GENERATE_COUNT} unique ringtones`);
           console.log(`⏱️  Duration: ${LENGTH_SECONDS}s per ringtone`);
           console.log(`🎛️  Auto-process: ${AUTO_PROCESS ? 'Yes' : 'No'}`);
+
+          // ─── FFMPEG RESOLUTION ─────────────────────────────────────────────────────
+          // Previously `ffmpeg` was simply assumed to be on PATH. GitHub's ubuntu runner does NOT ship
+          // ffmpeg, so every auto-process call threw "ffmpeg: not found", the error was swallowed by a
+          // console.warn and the RAW (untrimmed, unboosted) audio was uploaded. Now we resolve a working
+          // binary (system ffmpeg → FFMPEG_PATH → @ffmpeg-installer/ffmpeg) and abort early if none works.
+          function resolveFfmpeg() {
+            const candidates = [process.env.FFMPEG_PATH, 'ffmpeg'];
+            try {
+              const _req = createRequire(import.meta.url);
+              candidates.push(_req('@ffmpeg-installer/ffmpeg').path);
+            } catch {}
+            for (const c of candidates.filter(Boolean)) {
+              try {
+                const v = execSync(`"${c}" -version`, { stdio: ['ignore', 'pipe', 'pipe'], timeout: 15000 }).toString().split('\n')[0];
+                return { bin: c, version: v };
+              } catch {}
+            }
+            return null;
+          }
+          const FFMPEG = AUTO_PROCESS ? resolveFfmpeg() : null;
           if (AUTO_PROCESS) {
             console.log(`🔊 Volume Boost: ${Math.round(VOLUME_BOOST * 100)}%`);
             console.log(`🔇 Silence Threshold: ${SILENCE_THRESHOLD}`);
             console.log(`⏩ Pad: ${Math.round(PAD_SEC * 1000)}ms`);
+            if (FFMPEG) {
+              console.log(`🎬 ffmpeg: ${FFMPEG.bin} (${FFMPEG.version})`);
+            } else {
+              console.error('❌ auto_process=true but NO working ffmpeg binary was found (system ffmpeg / FFMPEG_PATH / @ffmpeg-installer).');
+              console.error('   Silence trim + volume boost would be silently skipped — aborting BEFORE spending generation credits.');
+              console.error('   Fix: keep the "Install ffmpeg" step in this workflow, or set auto_process=false.');
+              process.exit(1);
+            }
           }
+          // Audio processing stats for the run summary
+          const audioStats = { processed: 0, failed: 0, trimmedSec: 0, reasons: [] };
           console.log(`🎯 Target: ${TARGET_ACCOUNT} → ${TARGET_DB_URLS.map(d => d.name).join(' + ')}`);
           TARGET_DB_URLS.forEach(d => console.log(`   🔥 ${d.name}: ${d.url}`));
           console.log(`📂 Queue Path: ${QUEUE_PATH}`);
@@ -242,7 +294,7 @@ jobs:
           console.log('============================================================\n');
 
           // ─── GEMINI VIA WEB SCRAPING (uses saved Google session) ───────────────────
-          async function callGeminiWeb(promptText, geminiPage) {
+          async function callGeminiWeb(promptText, geminiPage, opts = {}) {
             console.log(`    🌐 Sending prompt (${promptText.length} chars)...`);
 
             // Click input and clear it
@@ -279,6 +331,12 @@ jobs:
 
             // Poll: wait for the new response element to appear, then stabilize
             const deadline = Date.now() + 90000;
+            // v27.10: a reply is only accepted once it contains the closing tag of the LAST template section
+            // (opts.completeWhen). Before, a 3 s pause while Gemini was still streaming was mistaken for a
+            // finished answer -> half a template got parsed -> the audio prompt silently fell back to
+            // "electronic synth pulse" while title/tags described another sound (ringtone != metadata).
+            const completeRe = opts.completeWhen || null;
+            const softDeadline = Date.now() + 75000;   // after this a stable partial reply is accepted (the parser validates it)
             let responseText = '';
             let lastSeen = '';
             let stableCount = 0;
@@ -318,7 +376,7 @@ jobs:
               // Track stability
               if (latestText === lastSeen) {
                 stableCount++;
-                if (stableCount >= 2) {
+                if (stableCount >= 2 && (!completeRe || completeRe.test(latestText) || Date.now() > softDeadline)) {
                   responseText = latestText;
                   break;
                 }
@@ -413,6 +471,51 @@ jobs:
             return words.slice(0, 5).join(' ');
           }
 
+          // ─── ZEDGE CONTENT POLICY GUARD (v21) ─────────────────────────────────────
+          // Enforces Zedge's Content Guidelines on everything this workflow produces:
+          // original-only (no artists, songs, characters, brands, logos, celebrities), no
+          // adult / hate / violence / drugs / illegal content, accurate non-promotional
+          // metadata, 2–10 real tags. Violations are regenerated or skipped — never uploaded.
+          const ZEDGE_POLICY_RULES = `ZEDGE MARKETPLACE POLICY (MANDATORY — a single violation permanently suspends the seller account):
+          - 100% ORIGINAL work only. Never name, reference, imitate or hint at any real artist, band, singer, song, lyric, album, film, TV show, game, anime, cartoon, comic, character, franchise, brand, company, product, logo, trademark, sports team, celebrity or public figure. No "in the style of", no "sounds like", no theme/cover/remix of anything existing.
+          - No sexual, suggestive, nude or adult content. No hate speech, slurs, hate symbols, discrimination or stereotypes. No violence, gore, weapons, drugs, self-harm or illegal activity. Nothing involving minors.
+          - Metadata must be truthful and describe ONLY this item. No promotional or spam words (free, download, app, website, subscribe, follow, link, buy), no URLs, hashtags, @handles, emojis, brand or service names, no misleading keywords.
+          - Keywords: between 2 and 10 genuine descriptive single words.`;
+          const POLICY_PROMO = /\b(free|download|downloads|website|subscribe|follow|buy|sale|discount|promo|www|http|https|telegram|whatsapp|instagram|tiktok|youtube|facebook|twitter|zedge)\b/i;
+          const POLICY_ADULT = /\b(sexy|sex|sexual|nude|nudity|naked|porn|porno|xxx|erotic|erotica|boobs|breasts?|booty|bikini|lingerie|topless|hot girls?|seductive|nsfw|hentai|fetish|stripper|thong|underwear|cleavage)\b/i;
+          const POLICY_HARM = /\b(nigg\w*|fagg?\w*|retard\w*|murder|gore|gun|guns|rifle|pistol|shooting|shooter|terror\w*|nazi|hitler|swastika|isis|jihad|marijuana|cocaine|heroin|meth|drugs|suicide|self-harm|rape|racist|slur)\b/i;
+          const POLICY_IP = /\b(disney|pixar|marvel|dc comics|batman|superman|spider-?man|iron ?man|avengers|wolverine|x-?men|deadpool|harley quinn|star ?wars|darth|vader|yoda|jedi|mandalorian|grogu|harry ?potter|hogwarts|lord of the rings|hobbit|game of thrones|stranger things|squid game|breaking bad|pokemon|pikachu|charizard|super mario|luigi|zelda|minecraft|fortnite|roblox|among us|gta|call of duty|pubg|free fire|valorant|league of legends|overwatch|god of war|kratos|elden ring|naruto|goku|dragon ?ball|one piece|luffy|attack on titan|demon slayer|jujutsu|gojo|itachi|sasuke|death note|my hero academia|hello kitty|sanrio|mickey|minnie|donald duck|elsa|moana|encanto|toy story|shrek|minions|despicable|kung fu panda|spongebob|simpsons|rick and morty|peppa|paw patrol|barbie|hot wheels|lego|nike|adidas|puma|gucci|louis vuitton|iphone|samsung|xiaomi|oneplus|huawei|tesla|bmw|mercedes|audi|ferrari|lamborghini|porsche|toyota|coca-?cola|pepsi|starbucks|mcdonald'?s|kfc|netflix|spotify|nfl|nba|fifa|uefa|real madrid|barcelona|manchester united|liverpool fc|juventus|psg|messi|ronaldo|neymar|mbappe|lebron|taylor swift|beyonce|drake|eminem|rihanna|bts|blackpink|billie eilish|ed sheeran|weeknd|bad bunny|justin bieber|ariana grande|dua lipa|coldplay|imagine dragons|linkin park|metallica|beatles|nirvana|michael jackson|elvis|kanye|travis scott|post malone|shakira|adele|bruno mars|hans zimmer|john williams|bollywood|shah rukh|salman khan|allu arjun|pushpa|kgf|pathaan|jawan|kabir singh|arijit|pritam|ar rahman|a\.r\. rahman|anirudh|nokia|nokia tune|marimba|over the horizon|xbox|playstation|nintendo|godzilla|king kong|jurassic|transformers|optimus prime|bumblebee|pirates of the caribbean|jack sparrow|james bond|mission impossible|john wick|fast and furious|terminator|poppy playtime|huggy wuggy|skibidi|fnaf|cuphead|genshin|honkai|clash of clans|clash royale|brawl stars|candy crush|angry birds|subway surfers|temple run|flappy bird|tom and jerry|doraemon|shinchan|ben 10|scooby|looney|bugs bunny|winnie the pooh|cars movie|lightning mcqueen|olaf|stitch|lilo|baymax|zootopia|inside out|wednesday addams|squid|haikyuu|chainsaw man|spy x family|frieren|solo leveling|sung jinwoo)\b/i;
+          function zedgePolicyIssues(meta) {
+            const issues = [];
+            const fields = { title: meta.title || '', tags: meta.tags || '', description: meta.description || '', prompt: meta.enhancedPrompt || '' };
+            for (const [f, v] of Object.entries(fields)) {
+              if (!v) continue;
+              const ip = v.match(POLICY_IP); if (ip) issues.push(`${f}: protected name "${ip[0]}"`);
+              const ad = v.match(POLICY_ADULT); if (ad) issues.push(`${f}: adult term "${ad[0]}"`);
+              const hv = v.match(POLICY_HARM); if (hv) issues.push(`${f}: prohibited term "${hv[0]}"`);
+              if (f !== 'prompt') {
+                const pr = v.match(POLICY_PROMO); if (pr) issues.push(`${f}: promotional/spam word "${pr[0]}"`);
+                if (/[#@]|https?:|www\.|\.(com|net|org|io|app)\b/i.test(v)) issues.push(`${f}: link/hashtag/handle`);
+              }
+            }
+            return issues;
+          }
+          function zedgeCleanTags(tags) {
+            const words = String(tags || '').split(/[,\s]+/).map(w => w.trim().toLowerCase()).filter(w => /^[a-z0-9-]{2,20}$/.test(w));
+            const out = [];
+            for (const w of words) if (!out.includes(w) && !POLICY_IP.test(w) && !POLICY_ADULT.test(w) && !POLICY_HARM.test(w) && !POLICY_PROMO.test(w)) out.push(w);
+            return out.slice(0, 10);
+          }
+          // Returns { issues, meta } — meta has policy-clean, deduped, 2–10 tags.
+          function zedgeEnforce(meta, kind) {
+            const issues = zedgePolicyIssues(meta);
+            const tags = zedgeCleanTags(meta.tags);
+            const fallback = kind === 'image' ? ['wallpaper', 'background', 'art', 'design', 'phone', 'screen'] : ['melody', 'tune', 'alert', 'phone', 'music', 'sound'];
+            const cat = String(meta.category || '').toLowerCase().replace(/[^a-z]/g, '');
+            if (cat && cat !== 'other' && !tags.includes(cat)) tags.unshift(cat);
+            for (const w of fallback) { if (tags.length >= 2) break; if (!tags.includes(w)) tags.push(w); }
+            return { issues, meta: { ...meta, tags: tags.slice(0, 10).join(', ') } };
+          }
           // ─── METADATA GENERATION ───────────────────────────────────────────────────
           // ─── SMART PROMPT VARIETY ENGINE ─────────────────────────────────────────
           // 1) Shuffled-deck sampling: all 15 themes are dealt before any theme repeats.
@@ -532,8 +635,17 @@ jobs:
                 RECENT_CONCEPTS.map((c, i) => `${i + 1}. ${c}`).join('\n') + `\n\n`
               : '';
 
+            // v27.10: the audio is rendered by a text-to-MUSIC model. It cannot make realistic animal calls, speech,
+            // laughter or real-world foley - asking for "a lion roar" yields a synth pad titled "Lion Roar", i.e. the
+            // sound does not match its metadata. Gemini is told what the renderer can do and that TITLE / KEYWORDS /
+            // DESCRIPTION must describe the ENHANCED_PROMPT literally (same instruments, mood, tempo).
+            const RENDERER_RULES = `AUDIO RENDERER FACTS (the ENHANCED_PROMPT is sent VERBATIM to a text-to-MUSIC AI model that renders exactly ${LENGTH_SECONDS} seconds; nothing is edited afterwards):\n` +
+              `- It renders instruments, genres, rhythm, tempo, mood and synthetic textures very well.\n` +
+              `- It CANNOT produce realistic animal calls, human voices, speech, laughter, words or recognizable real-world recordings (rain, typing, crowds, engines, sirens...). When the theme is such a sound, translate it into a MUSICAL equivalent (lion roar -> deep growling brass swell over tribal drums; thunderstorm -> rumbling timpani and dark low strings; keyboard typing -> crisp woodblock and rimshot pattern) and describe THAT.\n` +
+              `- TITLE, KEYWORDS and DESCRIPTION must describe ONLY what the ENHANCED_PROMPT will literally sound like. Never promise a sound, voice or effect that is not written in the ENHANCED_PROMPT. Every keyword must be justified by a word or idea present in the ENHANCED_PROMPT; use the same instrument, genre and mood words in both.`;
+
             // Construct the single, unified consolidated prompt
-            const CONSOLIDATED_PROMPT = `You are an award-winning mobile sound designer and metadata optimizer. Your ringtones and notification sounds top marketplace charts because they are wildly creative, instantly catchy, and a genuine pleasure to hear — people happily pay for them.\n\n` +
+            const CONSOLIDATED_PROMPT = `You are an award-winning mobile sound designer and metadata optimizer. Your ringtones and notification sounds top marketplace charts because they are wildly creative, instantly catchy, and a genuine pleasure to hear — people happily pay for them.\n\n${ZEDGE_POLICY_RULES}\n\n${RENDERER_RULES}\n\n` +
               (prompt 
                 ? `I want to generate a ${soundType} based on this idea: "${prompt}".\n` +
                   `Rewrite it into a vivid, detailed 30-word text-to-music prompt with organic, high-definition textures.\n\n${craftRules}\n\n[Salt: ${randomSalt}]\n\n`
@@ -545,7 +657,7 @@ jobs:
                   `${noveltyBlock}[Random Salt: ${randomSalt}]\n\n`) +
               `Based on that generated text-to-music prompt, also generate the following metadata:\n` +
               `1. A creative and UNIQUE title (max 25 characters). DO NOT USE THESE BANNED WORDS: ${BANNED_WORDS}. Reflect the ${selectedPath} nature and ${soundType} purpose using evocative imagery. No quotes.\n` +
-              `2. 15 relevant, descriptive SINGLE-WORD keywords (comma-separated). Focus on genre, mood, animals, emotions, vibes. Avoid generic terms.\n` +
+              `2. 10 relevant, descriptive SINGLE-WORD keywords (comma-separated) that truthfully describe THIS sound only. Focus on genre, mood, animals, emotions, vibes. No brands, artists, promo words.\n` +
               `3. The most appropriate category selected ONLY from this list: ${validCategories}.\n` +
               `4. A SHORT description in MAXIMUM 5 WORDS capturing the soul of the sound. No punctuation, no sentences.\n\n` +
               `CRITICAL: You MUST format your entire response exactly like this template so it can be parsed programmatically. Do not include any introductory or concluding text outside these tags:\n` +
@@ -565,13 +677,23 @@ jobs:
             await sleep(2000);
 
             // Send the single consolidated prompt
-            const responseText = await callGeminiWeb(CONSOLIDATED_PROMPT, geminiPage);
+            const responseText = await callGeminiWeb(CONSOLIDATED_PROMPT, geminiPage, { completeWhen: /\[\s*\/\s*DESCRIPTION\s*\]/i });
 
             // Parser helper for tags
             const getTagValue = (text, tag) => {
-              const regex = new RegExp(`\\[${tag}\\]([\\s\\S]*?)\\[\\/${tag}\\]`, 'i');
-              const match = text.match(regex);
-              return match ? match[1].trim() : '';
+              // v27.10 tolerant parser: Gemini renders markdown, so "[ENHANCED_PROMPT]" can come back as
+              // "**[ENHANCED PROMPT]**", "[ENHANCEDPROMPT]", with a ":" after it, or without its closing tag.
+              // The old strict regex then returned '' and the caller silently used a fallback value.
+              const t = tag.replace(/_/g, '[_ \\-]?');
+              const open = new RegExp(`\\[\\s*${t}\\s*\\]\\s*:?`, 'i');
+              const m = text.match(open);
+              if (!m) return '';
+              let rest = text.slice(m.index + m[0].length);
+              const close = rest.match(new RegExp(`\\[\\s*\\/\\s*${t}\\s*\\]`, 'i'));
+              if (close) rest = rest.slice(0, close.index);
+              else { const nx = rest.match(/\[\s*\/?\s*(ENHANCED[_ -]?PROMPT|TITLE|KEYWORDS|CATEGORY|DESCRIPTION|POLICY)\s*\]/i); if (nx) rest = rest.slice(0, nx.index); }
+              rest = rest.replace(/\*\*/g, '').replace(/^`+|`+$/g, '').replace(/^\s*:\s*/, '').trim();
+              return /^(\.{3}|\u2026)$/.test(rest) ? '' : rest;   // the literal "..." template placeholder counts as missing
             };
 
             const r0 = getTagValue(responseText, 'ENHANCED_PROMPT');
@@ -580,11 +702,36 @@ jobs:
             const r3 = getTagValue(responseText, 'CATEGORY');
             const r4 = getTagValue(responseText, 'DESCRIPTION');
 
-            const enhancedPrompt = r0.replace(/^["']|["']$/g, '').trim() || prompt || 'electronic synth pulse';
+            // v27.10: never fall back silently. A missing ENHANCED_PROMPT / TITLE / KEYWORDS throws, so the caller
+            // retries in a fresh chat (3 attempts). Before, a half-parsed reply made Stable Audio render the generic
+            // fallback "electronic synth pulse" while the stored title/tags described a completely different sound.
+            const missing = [];
+            if (!r0 || r0.split(/\s+/).filter(Boolean).length < 5) missing.push('ENHANCED_PROMPT');
+            if (!r1) missing.push('TITLE');
+            if (!r2) missing.push('KEYWORDS');
+            if (missing.length) {
+              console.warn(`  ⚠️ Gemini reply incomplete - missing ${missing.join(', ')} | reply head: "${responseText.slice(0, 180).replace(/\s+/g, ' ')}"`);
+              throw new Error(`Gemini reply incomplete (missing ${missing.join(', ')}) - regenerating`);
+            }
+            if (!r3) console.warn('  ⚠️ CATEGORY tag missing -> OTHER');
+            if (!r4) console.warn('  ⚠️ DESCRIPTION tag missing -> derived from the title');
+            const enhancedPrompt = r0.replace(/^["']|["']$/g, '').trim();
             const finalTitle = cleanTitle(r1) || (prompt || 'Random Ringtone').split(' ').slice(0, 4).join(' ').slice(0, 30);
             const finalTags = cleanKeywords(r2);
             const finalCategory = cleanCategory(r3);
-            const finalDesc = cleanDescription(r4);
+            const finalDesc = cleanDescription(r4) || finalTitle;
+
+            // v27.10 alignment guard: the tags must describe the ENHANCED_PROMPT (= what Stable Audio actually renders).
+            // Zero overlap between tag stems and prompt words means the metadata talks about another sound -> regenerate.
+            const promptWords = (enhancedPrompt.toLowerCase().match(/[a-z]{3,}/g) || []);
+            const stem = (w) => w.slice(0, 4);
+            const tagList = finalTags.split(',').map(x => x.trim().toLowerCase()).filter(Boolean);
+            const overlap = tagList.filter(tg => promptWords.some(w => w.startsWith(stem(tg)) || tg.startsWith(stem(w))));
+            if (tagList.length && overlap.length === 0) {
+              console.warn(`  ⚠️ Tags do not describe the audio prompt (0 overlap) - regenerating. Prompt: "${enhancedPrompt.slice(0, 100)}" | Tags: ${finalTags}`);
+              throw new Error('metadata does not describe the audio prompt - regenerating');
+            }
+            console.log(`  🔗 Metadata/audio alignment: ${overlap.length}/${tagList.length} tags found in the audio prompt`);
 
             console.log(`  ✨ Enhanced Prompt: "${enhancedPrompt}"`);
             rememberConcept(finalTitle, enhancedPrompt);
@@ -926,59 +1073,104 @@ jobs:
           }
 
           // ─── AUDIO AUTO-PROCESSING (via ffmpeg) ────────────────────────────────────
-          // Trim silence + apply volume boost using ffmpeg (server-side equivalent of browser AudioContext)
+          // Trim silence + normalize + volume boost using ffmpeg.
+          // Returns { buffer, stats } — stats are logged AND stored in Firebase so the panel/app can show
+          // exactly what happened (previously nothing was recorded, so a skipped process looked identical
+          // to a successful one).
+          function ffRun(args, timeout = 60000) {
+            try {
+              return execSync(`"${FFMPEG.bin}" -hide_banner -nostats ${args}`, { timeout, stdio: ['ignore', 'pipe', 'pipe'] }).toString();
+            } catch (e) {
+              const stderrTail = e.stderr ? e.stderr.toString().trim().split('\n').slice(-5).join(' | ') : '';
+              throw new Error(`ffmpeg failed: ${stderrTail || e.message}`);
+            }
+          }
+          // Measure duration + peak/mean volume of a file (single ffmpeg pass with volumedetect)
+          function ffMeasure(file) {
+            // volumedetect prints to stderr; merge it into stdout (2>&1) and never let the shell fail the call
+            const out = execSync(`"${FFMPEG.bin}" -hide_banner -nostats -i "${file}" -af volumedetect -f null - 2>&1 || true`,
+              { timeout: 60000, stdio: ['ignore', 'pipe', 'ignore'] }).toString();
+            if (!/max_volume/.test(out)) {
+              throw new Error(`ffmpeg measure failed: ${out.trim().split('\n').slice(-3).join(' | ')}`);
+            }
+            const dur = /Duration:\s*(\d+):(\d+):([\d.]+)/.exec(out);
+            const peak = /max_volume:\s*(-?[\d.]+)\s*dB/.exec(out);
+            const mean = /mean_volume:\s*(-?[\d.]+)\s*dB/.exec(out);
+            return {
+              duration: dur ? (+dur[1]) * 3600 + (+dur[2]) * 60 + (+dur[3]) : null,
+              peakDb: peak ? parseFloat(peak[1]) : null,
+              meanDb: mean ? parseFloat(mean[1]) : null,
+            };
+          }
+
           async function autoProcessAudio(inputBuffer, gainFactor, silenceThreshold, padSec) {
+            if (!FFMPEG) throw new Error('ffmpeg binary not available');
             const tmpDir    = '/tmp/ringtone_proc';
             fs.mkdirSync(tmpDir, { recursive: true });
-            const tmpIn     = path.join(tmpDir, `in_${Date.now()}.mp3`);
-            const tmpOut    = path.join(tmpDir, `out_${Date.now()}.mp3`);
-
+            const stamp     = `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+            const tmpIn     = path.join(tmpDir, `in_${stamp}.mp3`);
+            const tmpOut    = path.join(tmpDir, `out_${stamp}.mp3`);
             fs.writeFileSync(tmpIn, inputBuffer);
 
-            // ffmpeg command:
-            //   silenceremove: trim leading/trailing silence
-            //   volume: amplify by gainFactor
-            const dbThreshold = 20 * Math.log10(silenceThreshold); // convert linear to dB
+            const dbThreshold = 20 * Math.log10(silenceThreshold); // linear → dB (0.02 → -34dB)
             const dbStr = `${dbThreshold.toFixed(1)}dB`;
-            const padMs = Math.round(padSec * 1000);
 
             try {
-              // Step 1: Detect silence boundaries and trim
-              const ffmpegPath = process.env.FFMPEG_PATH || 'ffmpeg';
-              // detection=peak matches the linear amplitude threshold semantics of the browser AudioContext version.
-              // start_silence keeps up to padSec of silence at each edge (real edge padding, previously broken:
-              // padSec was wrongly passed as start_duration, so padding was never applied and quiet audio got eaten).
-              const filterComplex = [
-                // Trim silence from start, keeping padSec of leading silence as edge padding
+              // Pass 1: measure the raw file
+              const before = ffMeasure(tmpIn);
+
+              // Gain plan:
+              //   • normalizeDb  → lift the peak to -1 dBFS (Stable Audio output is often very quiet, -15…-25 dB peaks;
+              //                    a plain ×2 "boost" on such a file is barely audible — THAT is why boost felt like it did nothing)
+              //   • boostDb      → the user's volume_boost_pct on top (200% = +6 dB), squashed by the limiter → louder/punchier
+              const boostDb = 20 * Math.log10(Math.max(gainFactor, 0.01));
+              const normalizeDb = before.peakDb == null ? 0 : Math.min(30, Math.max(0, -1.0 - before.peakDb));
+              const totalGainDb = normalizeDb + boostDb;
+
+              const filterChain = [
+                // Trim leading silence, keep padSec of it as edge padding (detection=peak == linear amplitude threshold)
                 `silenceremove=start_periods=1:start_threshold=${dbStr}:start_silence=${padSec}:detection=peak`,
-                // Trim silence from end (reverse, trim, reverse back), keeping padSec of trailing padding
+                // Trim trailing silence (reverse → trim → reverse)
                 `areverse`,
                 `silenceremove=start_periods=1:start_threshold=${dbStr}:start_silence=${padSec}:detection=peak`,
                 `areverse`,
-                // Apply volume boost
-                `volume=${gainFactor}`,
-                // Brick-wall limiter: prevents the clipping/distortion the raw boost caused at 200-400%
-                `alimiter=limit=0.97:attack=5:release=50:level=false`
+                // Normalize + boost in one gain stage
+                `volume=${totalGainDb.toFixed(2)}dB`,
+                // Brick-wall limiter → no clipping/distortion at 200-400%
+                `alimiter=limit=0.95:attack=5:release=50:level=false`
               ].join(',');
 
-              // Capture stderr so real ffmpeg errors surface instead of being discarded by 2>/dev/null
-              try {
-                execSync(
-                  `${ffmpegPath} -hide_banner -nostats -i "${tmpIn}" -af "${filterComplex}" -ar 44100 -b:a 192k -y "${tmpOut}"`,
-                  { timeout: 60000, stdio: ['ignore', 'ignore', 'pipe'] }
-                );
-              } catch (e) {
-                const stderrTail = e.stderr ? e.stderr.toString().trim().split('\n').slice(-5).join(' | ') : '';
-                throw new Error(`ffmpeg failed: ${stderrTail || e.message}`);
-              }
+              ffRun(`-i "${tmpIn}" -af "${filterChain}" -ar 44100 -b:a 192k -y "${tmpOut}"`);
 
               if (!fs.existsSync(tmpOut) || fs.statSync(tmpOut).size < 1000) {
-                throw new Error('ffmpeg output empty or too small');
+                throw new Error('ffmpeg output empty or too small (was the whole clip below the silence threshold?)');
               }
 
+              // Pass 2: measure the result so we can PROVE the processing happened
+              const after = ffMeasure(tmpOut);
               const outBuf = fs.readFileSync(tmpOut);
-              console.log(`  🎛️  Processed: ${(inputBuffer.length / 1024).toFixed(0)}KB → ${(outBuf.length / 1024).toFixed(0)}KB`);
-              return outBuf;
+              const trimmed = (before.duration != null && after.duration != null) ? Math.max(0, before.duration - after.duration) : null;
+
+              const stats = {
+                durationBefore: before.duration != null ? +before.duration.toFixed(2) : null,
+                durationAfter:  after.duration  != null ? +after.duration.toFixed(2)  : null,
+                trimmedSec:     trimmed != null ? +trimmed.toFixed(2) : null,
+                peakBeforeDb:   before.peakDb,
+                peakAfterDb:    after.peakDb,
+                meanBeforeDb:   before.meanDb,
+                meanAfterDb:    after.meanDb,
+                gainDb:         +totalGainDb.toFixed(2),
+                normalizeDb:    +normalizeDb.toFixed(2),
+                boostDb:        +boostDb.toFixed(2),
+                boostPct:       Math.round(gainFactor * 100),
+                silenceThreshold,
+                padMs:          Math.round(padSec * 1000),
+                ffmpeg:         FFMPEG.version,
+              };
+              console.log(`  🎛️  Processed: ${(inputBuffer.length / 1024).toFixed(0)}KB → ${(outBuf.length / 1024).toFixed(0)}KB | `
+                + `${stats.durationBefore}s → ${stats.durationAfter}s (trimmed ${stats.trimmedSec}s) | `
+                + `peak ${stats.peakBeforeDb}dB → ${stats.peakAfterDb}dB | gain +${stats.gainDb}dB (normalize ${stats.normalizeDb} + boost ${stats.boostDb})`);
+              return { buffer: outBuf, stats };
             } finally {
               try { fs.unlinkSync(tmpIn); } catch {}
               try { fs.unlinkSync(tmpOut); } catch {}
@@ -1022,7 +1214,7 @@ jobs:
           // Uploads an audio Buffer to Cloudflare R2 via the worker and returns the public URL.
           async function uploadToR2(audioBuffer, fileName, dbName) {
             const cleanedName = fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
-            const destinationKey = `${dbName}/${Date.now()}_${cleanedName}`;
+            const destinationKey = `${String(dbName).replace(/^zedge_?/i, 'zedge')}/ringtone/${Date.now()}_${cleanedName}`; // v21.1: same folder layout as panel/app (zedgeN/ringtone/)
             let response;
             try {
               response = await fetch(R2_WORKER_URL, {
@@ -1143,32 +1335,44 @@ jobs:
           // Each call produces a fresh audio (new seed) + fresh metadata → unique upload.
           async function generateAndPushOne(prompt, dbTarget) {
             // Step A: Unique metadata per account (Gemini re-called each time)
-            let meta;
-            try {
-              meta = await generateMetadataFromPrompt(prompt);
-              console.log(`  📝 [${dbTarget.name}] Title: "${meta.title}"`);
-              console.log(`  🏷️  [${dbTarget.name}] Tags: ${meta.tags}`);
-            } catch (e) {
-              console.warn(`  ⚠️ [${dbTarget.name}] Metadata failed: ${e.message} — using fallback`);
-              meta = {
-                enhancedPrompt: prompt || 'electronic synth pulse',
-                title: (prompt || 'Random Ringtone').split(' ').slice(0, 4).join(' ').slice(0, 30),
-                tags: '',
-                category: 'OTHER',
-                description: ''
-              };
+            // Zedge policy: the user-supplied idea itself must be clean (no artists/characters/brands).
+            if (prompt) { const pi = zedgePolicyIssues({ title: prompt }); if (pi.length) throw new Error(`Zedge policy: idea prompt blocked — ${pi.join('; ')} (nothing generated)`); }
+            let meta = null;
+            for (let attempt = 1; attempt <= 3 && !meta; attempt++) {
+              let candidate;
+              try { candidate = await generateMetadataFromPrompt(prompt); }
+              catch (e) { console.warn(`  ⚠️ [${dbTarget.name}] Metadata attempt ${attempt}/3 failed: ${e.message}`); continue; }
+              const check = zedgeEnforce(candidate, 'audio');
+              if (check.issues.length) { console.warn(`  🚫 [${dbTarget.name}] Zedge policy (attempt ${attempt}/3): ${check.issues.join('; ')} — regenerating`); continue; }
+              meta = check.meta;
             }
+            if (!meta) throw new Error('Zedge policy: no compliant metadata after 3 attempts — item skipped, nothing uploaded');
+            console.log(`  📝 [${dbTarget.name}] Title: "${meta.title}"`);
+            console.log(`  🏷️  [${dbTarget.name}] Tags: ${meta.tags}  ✅ policy-checked`);
 
             // Step B: Generate unique audio (each call gets a random seed → different sound)
-            const { resultUrl } = await generateStableAudio(meta.enhancedPrompt, LENGTH_SECONDS);
+            const { resultUrl, seed } = await generateStableAudio(meta.enhancedPrompt, LENGTH_SECONDS);
+            console.log(`  🎼 [${dbTarget.name}] Audio prompt sent to Stable Audio: "${meta.enhancedPrompt}"`);
             let audioBuffer = await pollStableAudioResult(resultUrl);
 
-            // Step C: Optional auto-processing
+            // Step C: Optional auto-processing (silence trim + normalize + volume boost)
+            let processed = false;
+            let processing = null;
+            let processError = null;
             if (AUTO_PROCESS) {
               try {
-                audioBuffer = await autoProcessAudio(audioBuffer, VOLUME_BOOST, SILENCE_THRESHOLD, PAD_SEC);
+                const r = await autoProcessAudio(audioBuffer, VOLUME_BOOST, SILENCE_THRESHOLD, PAD_SEC);
+                audioBuffer = r.buffer;
+                processing = r.stats;
+                processed = true;
+                audioStats.processed++;
+                if (r.stats.trimmedSec) audioStats.trimmedSec += r.stats.trimmedSec;
               } catch (e) {
-                console.warn(`  ⚠️ [${dbTarget.name}] Auto-process failed: ${e.message}`);
+                processError = e.message;
+                audioStats.failed++;
+                if (audioStats.reasons.length < 10) audioStats.reasons.push(`[${dbTarget.name}] ${e.message.slice(0, 160)}`);
+                // Loud, unmissable warning — the RAW file will be uploaded, and the item is flagged processed:false
+                console.error(`  ❌ [${dbTarget.name}] AUTO-PROCESS FAILED → uploading RAW audio (no trim / no boost): ${e.message}`);
               }
             }
 
@@ -1191,12 +1395,22 @@ jobs:
               tags: meta.tags,
               category: meta.category,
               description: meta.description,
+              policyCheck: 'passed',
+              policyCheckedAt: Date.now(),
               status: 'queued',
-              prompt,
+              prompt: prompt || meta.enhancedPrompt,   // v27.10: what the audio model was really asked (shown as "Generation prompt" in panel/app/desktop)
+              enhancedPrompt: meta.enhancedPrompt,
+              audioSeed: seed,
+              audioModel: 'stable-audio-v2-5',
+              // Audio processing audit trail (visible in panel/app item details)
+              autoProcess: AUTO_PROCESS,
+              processed,
+              processing,
+              processError,
               createdAt: Date.now()
             });
-            console.log(`  ✅ [${dbTarget.name}] Firebase key: ${key}  🎵 "${meta.title}"`);
-            return { dbName: dbTarget.name, key, title: meta.title, category: meta.category };
+            console.log(`  ✅ [${dbTarget.name}] Firebase key: ${key}  🎵 "${meta.title}"${AUTO_PROCESS ? (processed ? '  🎛️ processed' : '  ⚠️ RAW (unprocessed)') : ''}`);
+            return { dbName: dbTarget.name, key, title: meta.title, category: meta.category, processed };
           }
 
           // ─── PROCESS A SINGLE PROMPT ───────────────────────────────────────────────
@@ -1322,7 +1536,32 @@ jobs:
               : 'SKIPPED';
             console.log(`  ${icon} [${i + 1}] "${r.prompt?.slice(0, 40)}" → ${detail}`);
           });
+          if (AUTO_PROCESS) {
+            console.log('');
+            console.log(`🎛️  Audio processing: ${audioStats.processed} processed, ${audioStats.failed} RAW (failed), ${audioStats.trimmedSec.toFixed(1)}s silence trimmed in total`);
+            audioStats.reasons.forEach(r => console.log(`     ⚠️ ${r}`));
+          }
           console.log('============================================================');
+
+          // Markdown for the GitHub step summary
+          try {
+            const md = [];
+            md.push(`| Result | Count |`, `|---|---|`);
+            md.push(`| ✅ Generated | ${successCount}/${AUTO_GENERATE_COUNT} |`);
+            md.push(`| ❌ Failed | ${failedCount}/${AUTO_GENERATE_COUNT} |`);
+            md.push(`| ⏭️ Skipped | ${skippedCount}/${AUTO_GENERATE_COUNT} |`);
+            if (AUTO_PROCESS) {
+              md.push(`| 🎛️ Audio processed (trim + boost) | ${audioStats.processed} |`);
+              md.push(`| ⚠️ Uploaded RAW (processing failed) | ${audioStats.failed} |`);
+              md.push(`| ✂️ Silence trimmed (total) | ${audioStats.trimmedSec.toFixed(1)}s |`);
+              md.push(`| 🎬 ffmpeg | ${FFMPEG ? FFMPEG.version : 'not found'} |`);
+            }
+            if (audioStats.reasons.length) {
+              md.push('', '**Processing failures:**', '');
+              audioStats.reasons.forEach(r => md.push(`- ${r.replace(/\|/g, '\\|')}`));
+            }
+            fs.writeFileSync('/tmp/generator_summary.md', md.join('\n') + '\n');
+          } catch {}
 
           if (failedCount === AUTO_GENERATE_COUNT) {
             process.exit(1);
@@ -1343,10 +1582,1161 @@ jobs:
           echo "| Volume Boost | ${{ github.event.inputs.volume_boost_pct }}% |" >> $GITHUB_STEP_SUMMARY
           echo "| Target Account | ${{ github.event.inputs.target_account }} |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
+          if [ -f /tmp/generator_summary.md ]; then
+            echo "### 🎛️ Generation & audio processing" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            cat /tmp/generator_summary.md >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
           echo "> Ringtones pushed to Firebase with status **queued** — Zedge bot will pick them up on next run." >> $GITHUB_STEP_SUMMARY
 
+  # ═══════════════════════════════════════════════════════════════════════════
+  # 🎨 IMAGE STUDIO — bulk prompts → Cloudinary image generation → 1620×2880 JPGs
+  #    → (optional) R2 + Firebase distribution, all inside the runner.
+  #    A control panel is exposed through a Cloudflare quick tunnel (trycloudflare.com)
+  #    so you can upload prompts, pick model / ratio / settings, watch progress and
+  #    distribute results from any device. If your power/internet drops, the runner keeps
+  #    generating; just reopen the same link when you are back.
+  #    When you press "Finish session" (or the timeout / idle auto-finish hits), the
+  #    existing Gemini-Web metadata job runs automatically for the distributed items.
+  # ═══════════════════════════════════════════════════════════════════════════
+  image-studio:
+    if: github.event.inputs.mode == 'image_studio'
+    name: 🎨 Image Studio → Cloudflare tunnel panel → R2 + Firebase
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    outputs:
+      run_metadata: ${{ steps.result.outputs.run_metadata }}
+      records: ${{ steps.result.outputs.records }}
+      generated: ${{ steps.result.outputs.generated }}
+
+    steps:
+      - name: 📦 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: 🌩️ Install cloudflared (quick tunnel, no Cloudflare account needed)
+        run: |
+          curl -fsSL -o /tmp/cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i /tmp/cloudflared.deb
+          sudo apt-get install -y -qq zip > /dev/null
+          cloudflared --version
+
+      - name: 📝 Write Image Studio server
+        run: |
+          cat > studio_server.mjs << 'STUDIO_EOF'
+          // ☁️ Image Studio server — runs inside the GitHub Actions runner, exposed via a Cloudflare quick tunnel.
+          // Bulk prompts → Cloudinary Image Generation API → 1620×2880 JPGs → (optional) R2 + Firebase distribution.
+          import http from 'http';
+          import fs from 'fs';
+          import path from 'path';
+          import { execSync } from 'child_process';
+          import crypto from 'crypto';
+
+          // ─── CONFIG ────────────────────────────────────────────────────────────────
+          const PORT            = parseInt(process.env.STUDIO_PORT || '8787', 10);
+          const TOKEN           = (process.env.STUDIO_TOKEN || crypto.randomBytes(12).toString('hex')).trim();
+          const TIMEOUT_MIN     = Math.min(330, Math.max(5, parseInt(process.env.STUDIO_TIMEOUT_MINUTES || '240', 10) || 240)); // GitHub job hard limit is 360 min
+          const OUT_DIR         = process.env.STUDIO_OUT_DIR || '/tmp/studio_out';
+          const RESULT_FILE     = process.env.STUDIO_RESULT_FILE || '/tmp/studio_result.json';
+          const R2_WORKER_URL   = process.env.R2_WORKER_URL || 'https://frosty-pine-2f7dzedge-r2-gateway.holaexplainer.workers.dev';
+          const API_BASE        = process.env.STUDIO_API_BASE || 'https://api.cloudinary.com/v2';
+          const DELIVERY_BASE   = process.env.STUDIO_DELIVERY_BASE || 'https://res.cloudinary.com';
+          const WALL_W = 1620, WALL_H = 2880;
+
+          const FIREBASE_DB_MAP = {
+            zedge_1: 'https://zedgeautomation-default-rtdb.firebaseio.com',
+            zedge_2: 'https://zedge-automation-2-default-rtdb.asia-southeast1.firebasedatabase.app',
+            zedge_3: 'https://zedge-automation-3-default-rtdb.asia-southeast1.firebasedatabase.app',
+            zedge_4: 'https://zedge-4-default-rtdb.asia-southeast1.firebasedatabase.app'
+          };
+
+          if (process.env.STUDIO_FIREBASE_MAP_JSON) { try { Object.assign(FIREBASE_DB_MAP, JSON.parse(process.env.STUDIO_FIREBASE_MAP_JSON)); } catch {} }
+
+          const TEXT_MODELS = [
+            'nano-banana-1', 'nano-banana-2-lite', 'nano-banana-2',
+            'flux-2-klein-9b', 'flux-2-flash', 'flux-2-pro',
+            'recraft-v3', 'recraft-v4', 'recraft-v4.1-utility', 'recraft-v4.1-utility-pro',
+            'gpt-image-1-mini', 'gpt-image-2', 'gpt-image-2.5-flare', 'gpt-image-2.5-sunburst',
+            'ideogram-v4-base', 'ideogram-v4-turbo',
+            'muse-image', 'mai-image-2.5',
+            'seedream-5-lite', 'seedream-5-pro',
+            'grok-imagine-image', 'grok-imagine-image-2.0-low',
+            'qwen-image-3'
+          ];
+          const EDIT_MODELS = [
+            'nano-banana-1-edit', 'nano-banana-2-lite-edit', 'nano-banana-2-edit',
+            'flux-2-klein-9b-edit', 'flux-2-flash-edit', 'flux-2-pro-edit',
+            'recraft-v3-edit',
+            'gpt-image-1-mini-edit', 'gpt-image-2-edit', 'gpt-image-2.5-flare-edit', 'gpt-image-2.5-sunburst-edit',
+            'muse-image-edit', 'mai-image-2.5-edit',
+            'seedream-5-lite-edit', 'seedream-5-pro-edit',
+            'grok-imagine-image-edit', 'grok-imagine-image-2.0-low-edit',
+            'qwen-image-3-edit'
+          ];
+          const RATIOS = { '9:16': [1620, 2880], '3:4': [2160, 2880], '1:1': [2160, 2160], '4:3': [2880, 2160], '16:9': [2880, 1620] };
+          const toEdit = m => (m.endsWith('-edit') ? m : m + '-edit');
+
+          // ─── PROMPT BUILDING (same rules as the Cloudinary Studio index.php) ───────
+          const BOOST = {
+            off: 'Natural, restrained color grading.',
+            soft: 'Gently enriched color: softly lifted saturation and a light luminous glow.',
+            vivid: 'Vivid eye-catching color: punchy saturation and strong but clean contrast.',
+            neon: 'Neon luxe grading: saturated neon accents against deep shadow, maximum screen impact while staying clean.',
+            ultra: 'Ultra impact grading: thumb-stopping saturation, bold contrast and dramatic light separation, without clipping detail.'
+          };
+          const DISPLAY = {
+            any: '',
+            amoled: 'Optimised for AMOLED: true black background areas and bright isolated highlights.',
+            lcd: 'Optimised for LCD: keep shadows slightly lifted so detail survives on bright panels.'
+          };
+          const BASE_RULES = 'Portrait 9:16 mobile wallpaper, vertical composition, keep the upper third clean for the clock and keep safe margins. No text, numbers, labels, signatures or watermarks. No phone frame, device mockup, border, collage or contact sheet. No humans, no copyrighted characters, franchises, brands or logos. Still image only.';
+          const BASE_RULES_FREE = 'Clean composition with safe margins. No text, numbers, labels, signatures or watermarks. No phone frame, device mockup, border, collage or contact sheet. No humans, no copyrighted characters, franchises, brands or logos. Still image only.';
+          const STRENGTH = {
+            subtle: { lock: 'Keep the same subject, composition, geometry, materials and style as the reference image [1]. Preserve the subject identity.', push: 'Apply the state described below so it is clearly noticeable when compared side by side with the reference.' },
+            clear:  { lock: 'Keep the same subject, identity, geometry, materials and art style as the reference image [1], and keep the camera framing similar.', push: 'This is an EDIT, not a copy: the lighting, glow, colours and sky MUST visibly change to match the state described below. Anyone comparing the two images must immediately see the difference.' },
+            strong: { lock: 'Keep only the subject identity, its shape and the art style from the reference image [1].', push: 'Transform the image boldly to match the state described below: relight the whole scene, change the sky/background tone, shadows, glow and colour palette dramatically. The result must look like a distinctly different moment of the same subject, never a near-duplicate of the reference.' }
+          };
+          const NO_DUPE = 'Do not return the reference unchanged. Do not add unplanned structures, duplicate the subject, or redesign it.';
+
+          // Frame "slot" names match the Firebase wallpaper-set records the metadata job + Zedge bot already read.
+          const SET_FRAMES = {
+            '24-HOUR': {
+              contentType: 'WALLPAPER_24H',
+              design: 'Design the scene so that time of day is unmistakable: include sky or ambient light, a dominant light source and visible shadows. This frame is the MORNING state.',
+              frames: [
+                { file: '01_morning.jpg',   slot: 'morning',   name: 'Morning',   instr: 'MORNING: pale cool-blue to soft peach sky, low sun from the side, long soft shadows, gentle mist, fresh muted palette, low contrast.' },
+                { file: '02_afternoon.jpg', slot: 'afternoon', name: 'Afternoon', instr: 'AFTERNOON: bright clear daylight, sun high overhead, short hard shadows, the brightest and most saturated frame, crisp clean contrast, no mist.' },
+                { file: '03_evening.jpg',   slot: 'evening',   name: 'Evening',   instr: 'EVENING / GOLDEN HOUR: deep orange-magenta sunset sky, very low warm sun, strong amber rim light on the subject, long dramatic shadows, warm dominant palette.' },
+                { file: '04_night.jpg',     slot: 'night',     name: 'Night',     instr: 'NIGHT: dark navy-black sky with stars or city glow, no sun, the subject lit only by its own glowing parts and cool moonlight, deep shadows, high-contrast neon highlights.' }
+              ]
+            },
+            'DUAL': {
+              contentType: 'WALLPAPER_DUAL',
+              design: 'This is the LOCK SCREEN frame: hero subject at 50–65% of frame width, placed lower-middle, upper third clean for the clock.',
+              frames: [
+                { file: '01_lock_screen.jpg', slot: 'lock', name: 'Lock screen', instr: 'LOCK SCREEN: hero subject roughly 50–65% of frame width, lower-middle, upper third clean for the clock. Strongest tasteful expression of the concept.' },
+                { file: '02_home_screen.jpg', slot: 'home', name: 'Home screen', instr: 'HOME SCREEN: pull the camera back to a clearly WIDER shot of the same scene: the subject is at most 30% of frame width and moved off-centre, more environment visible, calmer and darker overall so app icons stay readable. The framing must be obviously different from the reference.' }
+              ]
+            },
+            'BATTERY': {
+              contentType: 'WALLPAPER_BATTERY',
+              design: 'Design ONE clear energy pathway built into the subject: a glowing vertical channel (light strip, veins, circuit line, liquid level or crystal core) running from the very bottom to the very top of the subject, able to fill up like a gauge. In this frame the pathway is completely DORMANT: dark, unlit, grey/charcoal, zero glow. The subject is visible only through dim ambient light.',
+              frames: [
+                { file: '01_critical.jpg', slot: 'critical', name: 'Critical', instr: 'BATTERY CRITICAL (0–5%): the energy pathway is completely dormant: dark, unlit, grey/charcoal, zero glow anywhere except a faint dying red ember at the very bottom. Dim, low-key ambient lighting only.' },
+                { file: '02_low.jpg',      slot: 'low',      name: 'Low',      instr: 'BATTERY LOW (20%): the energy pathway glows brightly ONLY in its bottom 20% (the lowest fifth); the upper 80% stays dark and unlit. Faint coloured light spills onto nearby surfaces. Scene slightly brighter than the reference.' },
+                { file: '03_mid.jpg',      slot: 'mid',      name: 'Mid',      instr: 'BATTERY MID (50%): the energy pathway glows brightly from the bottom up to exactly half of its height; the upper half stays dark and unlit. Noticeable coloured glow spilling onto the subject. Scene clearly brighter than the reference.' },
+                { file: '04_high.jpg',     slot: 'high',     name: 'High',     instr: 'BATTERY HIGH (80%): the energy pathway glows from the bottom up to 80% of its height; only the top fifth remains dark. Intense saturated glow, bright rim light, energetic sparks or particles.' },
+                { file: '05_full.jpg',     slot: 'full',     name: 'Full',     instr: 'BATTERY FULL (100%): the ENTIRE energy pathway is lit end to end at maximum brightness, blazing saturated glow, light bloom, floating particles, the brightest and most vivid frame of the set.' },
+                { file: '06_charging.jpg', slot: 'charging', name: 'Charging', instr: 'BATTERY CHARGING: energy is visibly FLOWING UPWARD through the pathway: bright streaks, rising sparks, motion trails and a pulsing brighter core, with electric particles rising from the bottom. The pathway is lit about 60% with the top part showing incoming energy. Electric, dynamic mood.' }
+              ]
+            },
+            'SINGLE': {
+              contentType: 'WALLPAPER',
+              design: '',
+              frames: [{ file: '01_wallpaper.jpg', slot: 'single', name: 'Wallpaper', instr: 'One standalone wallpaper. No variants, no time states, no energy states, no companion image.' }]
+            }
+          };
+          const TYPE_ALIAS = { '24-HOUR': '24-HOUR', '24HOUR': '24-HOUR', '24': '24-HOUR', '24H': '24-HOUR', 'DAY': '24-HOUR', 'WALLPAPER24H': '24-HOUR', 'DUAL': 'DUAL', 'LOCKHOME': 'DUAL', 'WALLPAPERDUAL': 'DUAL', 'BATTERY': 'BATTERY', 'BAT': 'BATTERY', 'WALLPAPERBATTERY': 'BATTERY', 'SINGLE': 'SINGLE', 'ONE': 'SINGLE', 'WALLPAPER': 'SINGLE' };
+
+          const STOP = new Set('the a an and or of in on at to for with by from no not into over under this that these those is are be as it its very more most dark light color colour wallpaper mobile phone screen background image picture style concept creative eye catching'.split(' '));
+          const slug = t => (t || 'concept').toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'concept';
+          const pad2 = n => String(n).padStart(2, '0');
+          const conceptFrom = p => (p.split(/[,.\n]/)[0].trim().split(/\s+/).slice(0, 5).join(' ') || 'Concept');
+          const tagsFrom = p => { const out = []; for (const w of p.toLowerCase().replace(/[^a-z0-9\s-]/g, ' ').split(/\s+/)) { if (w.length > 2 && !STOP.has(w) && !out.includes(w)) out.push(w); if (out.length === 10) break; } return out; };
+          const sleep = ms => new Promise(r => setTimeout(r, ms));
+          const grading = s => [BOOST[s.boost] || '', DISPLAY[s.display] || ''].filter(Boolean).join(' ');
+
+          // ─── STATE ─────────────────────────────────────────────────────────────────
+          fs.mkdirSync(OUT_DIR, { recursive: true });
+          const STATE_FILE = path.join(OUT_DIR, 'studio_state.json');
+          const startedAt = Date.now();
+          const deadline  = startedAt + TIMEOUT_MIN * 60 * 1000;
+
+          const state = {
+            settings: {
+              model: 'gpt-image-2.5-sunburst', res: '2K', ratio: '9:16', boost: 'vivid', display: 'any', strength: 'clear', upscale: true,
+              concurrency: 2,
+              targetAccount: (process.env.TARGET_ACCOUNT || 'zedge_2').trim().toLowerCase(),
+              queuePath: (process.env.IMAGE_QUEUE_PATH || 'wallpaperQueue').trim(),
+              autoDistribute: false,
+              runMetadata: (process.env.STUDIO_AUTO_METADATA || 'true') !== 'false',
+              autoFinishMinutes: 0
+            },
+            items: [],
+            log: [],
+            paused: false,
+            finished: false,
+            finishReason: ''
+          };
+          const creds = {
+            cloud_name: (process.env.CLOUDINARY_CLOUD_NAME || '').trim(),
+            api_key: (process.env.CLOUDINARY_API_KEY || '').trim(),
+            api_secret: (process.env.CLOUDINARY_API_SECRET || '').trim()
+          };
+          // CLOUDINARY_URL=cloudinary://key:secret@cloud is also accepted
+          if ((!creds.cloud_name || !creds.api_key || !creds.api_secret) && process.env.CLOUDINARY_URL) {
+            const m = String(process.env.CLOUDINARY_URL).match(/^cloudinary:\/\/([^:]+):([^@]+)@([^/?]+)/);
+            if (m) { creds.api_key = m[1]; creds.api_secret = m[2]; creds.cloud_name = m[3]; }
+          }
+          const hasCreds = () => !!(creds.cloud_name && creds.api_key && creds.api_secret);
+
+          let nextId = 1;
+          let lastActivity = Date.now();
+          function log(msg) {
+            const line = `[${new Date().toISOString().slice(11, 19)}] ${msg}`;
+            console.log(line);
+            state.log.push(line);
+            if (state.log.length > 400) state.log.splice(0, state.log.length - 400);
+          }
+          let saveTimer = null;
+          function saveState() {
+            clearTimeout(saveTimer);
+            saveTimer = setTimeout(() => {
+              try { fs.writeFileSync(STATE_FILE, JSON.stringify({ ...state, log: undefined }, null, 2)); } catch (e) { console.error('state save failed', e.message); }
+            }, 300);
+          }
+
+          // ─── CLOUDINARY ────────────────────────────────────────────────────────────
+          async function cloudinaryGenerate(mode, payload) {
+            if (!hasCreds()) throw new Error('Cloudinary credentials missing — add them in Settings.');
+            const auth = 'Basic ' + Buffer.from(`${creds.api_key}:${creds.api_secret}`).toString('base64');
+            const ctrl = new AbortController();
+            const t = setTimeout(() => ctrl.abort(), 300000);
+            let res, data;
+            try {
+              res = await fetch(`${API_BASE}/generate/${encodeURIComponent(creds.cloud_name)}/${mode}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', Accept: 'application/json', Authorization: auth },
+                body: JSON.stringify(payload),
+                signal: ctrl.signal
+              });
+              const raw = await res.text();
+              try { data = JSON.parse(raw); } catch { data = { error: { message: raw.slice(0, 300) } }; }
+            } finally { clearTimeout(t); }
+            if (!res.ok) {
+              const e = data && data.error || {};
+              throw new Error(`${e.code ? e.code + ' ' : ''}${e.message || `HTTP ${res.status}`}`);
+            }
+            const asset = data.data && data.data.assets && data.data.assets[0];
+            if (!asset || !asset.storage || !asset.storage.asset_id) throw new Error('Cloudinary returned no managed asset.');
+            return asset;
+          }
+          function derivedUrl(storage, upscale, ratio) {
+            const [w, h] = RATIOS[ratio] || RATIOS['9:16'];
+            const v = storage.version ? `v${storage.version}/` : '';
+            return `${DELIVERY_BASE}/${creds.cloud_name}/image/upload/${upscale ? 'e_upscale/' : 'e_sharpen:60/'}c_fill,g_auto,w_${w},h_${h}/q_100/${v}${storage.public_id}.jpg`;
+          }
+          // Derived (e_upscale) assets answer 423 while Cloudinary renders them — retry.
+          async function downloadDerived(url) {
+            let lastStatus = 0;
+            for (let i = 0; i < 10; i++) {
+              const res = await fetch(url).catch(() => null);
+              if (res && res.ok) {
+                const buf = Buffer.from(await res.arrayBuffer());
+                if (buf.length > 1000) return buf;
+              }
+              lastStatus = res ? res.status : 0;
+              if (res && res.status !== 423 && res.status !== 429 && res.status < 500 && res.status !== 0) break;
+              await sleep(3000 + i * 1500);
+            }
+            throw new Error(`derived image download failed (HTTP ${lastStatus})`);
+          }
+
+          // ─── GENERATION WORKER ─────────────────────────────────────────────────────
+          function buildItem(o, index) {
+            const type = o.type, def = SET_FRAMES[type];
+            const concept = (o.concept || '').trim() || conceptFrom(o.prompt);
+            const st = { ...state.settings, ...(o.settings || {}) };
+            if (type !== 'SINGLE') st.ratio = '9:16';
+            const folder = `${pad2(index)}_${slug(concept)}_${type}`;
+            return {
+              id: nextId++, index, type, concept, prompt: o.prompt, folder,
+              settings: { model: st.model, res: st.res, ratio: st.ratio, boost: st.boost, display: st.display, strength: st.strength, upscale: !!st.upscale },
+              status: 'queued', anchorId: null, error: '',
+              frames: def.frames.map(f => ({ file: f.file, slot: f.slot, name: f.name, status: 'queued', url: '', localPath: '', size: 0, error: '', attempts: 0 })),
+              distributed: [], distributeStatus: '', distributeError: '',
+              metadata: { file: def.frames[0].file, title: concept.slice(0, 30), tags: tagsFrom(o.prompt || concept), category: 'DESIGNS', description: (o.prompt || concept).replace(/\s+/g, ' ').slice(0, 200) },
+              createdAt: Date.now()
+            };
+          }
+
+          async function generateFrame(item, f) {
+            const def = SET_FRAMES[item.type], frame = item.frames[f], fdef = def.frames[f], isAnchor = f === 0, st = item.settings;
+            if (!isAnchor && !item.anchorId) { frame.status = 'failed'; frame.error = 'anchor frame not ready'; return false; }
+            const base = st.model, editModel = EDIT_MODELS.includes(toEdit(base)) ? toEdit(base) : 'nano-banana-2-edit';
+            const grade = grading(st);
+            const rules = (item.type === 'SINGLE' && st.ratio !== '9:16') ? BASE_RULES_FREE : BASE_RULES;
+            const S = STRENGTH[st.strength] || STRENGTH.clear;
+            const prompt = isAnchor
+              ? [item.prompt, def.design, fdef.instr, grade, rules].filter(Boolean).join('\n\n')
+              : [item.prompt ? 'Concept: ' + item.prompt : '', S.lock, S.push, 'STATE TO RENDER — ' + fdef.instr, NO_DUPE, grade, rules].filter(Boolean).join('\n\n');
+            frame.status = 'running'; frame.error = ''; saveState();
+            let lastErr = null;
+            for (let attempt = 1; attempt <= 3; attempt++) {
+              frame.attempts++;
+              try {
+                const payload = {
+                  prompt,
+                  model: { id: isAnchor ? base : editModel },
+                  image_size: { aspect_ratio: st.ratio || '9:16', resolution: st.res || '2K' },
+                  format: 'png',
+                  target: { target_type: 'managed_asset', public_id: `zedge/${item.folder}/${fdef.file.replace(/\.jpg$/, '')}_${Date.now().toString(36)}` }
+                };
+                if (!isAnchor) payload.reference_images = [{ source_type: 'managed_asset', asset_id: item.anchorId }];
+                const asset = await cloudinaryGenerate(isAnchor ? 'text_to_image' : 'image_to_image', payload);
+                if (isAnchor) item.anchorId = asset.storage.asset_id;
+                const url = derivedUrl(asset.storage, st.upscale, st.ratio);
+                const buf = await downloadDerived(url);
+                const dir = path.join(OUT_DIR, item.folder); fs.mkdirSync(dir, { recursive: true });
+                const localPath = path.join(dir, fdef.file);
+                fs.writeFileSync(localPath, buf);
+                frame.url = url; frame.localPath = localPath; frame.size = buf.length; frame.status = 'done'; frame.error = '';
+                log(`✅ ${item.folder}/${fdef.file} (${(buf.length / 1024).toFixed(0)} KB)`);
+                saveState();
+                return true;
+              } catch (err) {
+                lastErr = err;
+                log(`⚠️ ${item.folder}/${fdef.file} attempt ${attempt}/3: ${err.message}`);
+                if (attempt < 3) await sleep(2000 * attempt);
+              }
+            }
+            frame.status = 'failed'; frame.error = lastErr ? lastErr.message : 'failed';
+            saveState();
+            return false;
+          }
+
+          function itemStatusFromFrames(item) {
+            const done = item.frames.filter(f => f.status === 'done').length;
+            if (done === item.frames.length) return 'done';
+            if (item.frames.some(f => f.status === 'running')) return 'running';
+            return done > 0 ? 'partial' : 'failed';
+          }
+
+          async function processItem(item) {
+            item.status = 'running'; item.error = ''; lastActivity = Date.now(); saveState();
+            log(`🎨 Generating ${item.folder} (${item.frames.length} frame${item.frames.length === 1 ? '' : 's'}) · ${item.settings.model}`);
+            // Anchor first (text_to_image); variants reference the anchor and run in parallel.
+            const anchorOk = item.frames[0].status === 'done' || await generateFrame(item, 0);
+            if (anchorOk && item.frames.length > 1) {
+              await Promise.all(item.frames.map((fr, i) => (i > 0 && fr.status !== 'done') ? generateFrame(item, i) : Promise.resolve(true)));
+            }
+            item.status = itemStatusFromFrames(item);
+            if (item.status !== 'done') item.error = item.frames.filter(f => f.status === 'failed').map(f => `${f.file}: ${f.error}`).join(' · ');
+            lastActivity = Date.now(); saveState();
+            if (item.status === 'done' && state.settings.autoDistribute) {
+              distributeItem(item, state.settings.targetAccount).catch(e => log(`❌ auto-distribute ${item.folder}: ${e.message}`));
+            }
+          }
+
+          let inFlight = 0;
+          let pumping = false;
+          async function pump() {
+            if (pumping) return; pumping = true;
+            try {
+              while (!state.finished && !state.paused && hasCreds()) {
+                const limit = Math.max(1, Math.min(4, parseInt(state.settings.concurrency, 10) || 1));
+                if (inFlight >= limit) break;
+                const next = state.items.find(i => i.status === 'queued');
+                if (!next) break;
+                inFlight++;
+                processItem(next).catch(e => { next.status = 'failed'; next.error = e.message; saveState(); }).finally(() => { inFlight--; pump(); });
+              }
+            } finally { pumping = false; }
+          }
+
+          // ─── DISTRIBUTION: Cloudinary JPG → R2 → Firebase (same schema as the panel / ringtone job) ──
+          function targetDbs(target) {
+            const t = String(target || state.settings.targetAccount || 'zedge_2').toLowerCase();
+            if (t === 'all_accounts' || t === 'all_four') return Object.entries(FIREBASE_DB_MAP).map(([name, url]) => ({ name, url }));
+            if (FIREBASE_DB_MAP[t]) return [{ name: t, url: FIREBASE_DB_MAP[t] }];
+            throw new Error(`Unknown target account "${target}"`);
+          }
+          async function uploadToR2(buffer, fileName, dbName) {
+            const cleaned = fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
+            const key = `${String(dbName).replace(/^zedge_?/i, 'zedge')}/wallpaper/${Date.now()}_${cleaned}`;
+            const res = await fetch(R2_WORKER_URL, { method: 'POST', headers: { 'X-File-Name': key, 'X-File-Type': 'image/jpeg' }, body: buffer }).catch(e => { throw netErr('R2 worker unreachable', e); });
+            if (!res.ok) throw new Error(`R2 upload failed (HTTP ${res.status}): ${(await res.text().catch(() => '')).slice(0, 200)}`);
+            const data = await res.json().catch(() => ({}));
+            if (!data.url) throw new Error(`R2 worker response missing 'url': ${JSON.stringify(data).slice(0, 200)}`);
+            return data.url;
+          }
+          const netErr = (what, e) => new Error(`${what}: ${e.message}${e.cause && e.cause.message ? ' (' + e.cause.message + ')' : ''}`);
+          async function firebasePush(dbUrl, queuePath, data) {
+            const res = await fetch(`${dbUrl}/${queuePath}.json`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }).catch(e => { throw netErr('Firebase unreachable', e); });
+            if (!res.ok) throw new Error(`Firebase push failed (${res.status}): ${(await res.text().catch(() => '')).slice(0, 200)}`);
+            return (await res.json()).name;
+          }
+          async function distributeItem(item, target) {
+            if (item.status !== 'done') throw new Error('item is not fully generated');
+            if (item.distributeStatus === 'running') return;
+            item.distributeStatus = 'running'; item.distributeError = ''; saveState();
+            const dbs = targetDbs(target).filter(db => !item.distributed.some(d => d.dbName === db.name));
+            const def = SET_FRAMES[item.type];
+            const [w, h] = RATIOS[item.settings.ratio] || RATIOS['9:16'];
+            const queuePath = state.settings.queuePath || 'wallpaperQueue';
+            let failures = [];
+            for (const db of dbs) {
+              try {
+                const files = {};
+                let first = null, totalSize = 0;
+                for (const fr of item.frames) {
+                  const buf = fs.readFileSync(fr.localPath);
+                  const name = `${slug(item.concept)}_${fr.file}`;
+                  const fileUrl = await uploadToR2(buf, name, db.name);
+                  const entry = { fileUrl, name, size: buf.length, type: 'image/jpeg', width: w, height: h };
+                  files[fr.slot] = entry; totalSize += buf.length;
+                  if (!first) first = entry;
+                  log(`☁️ [${db.name}] R2 ← ${item.folder}/${fr.file}`);
+                }
+                const base = {
+                  name: first.name, type: 'image/jpeg', size: item.type === 'SINGLE' ? first.size : totalSize,
+                  width: w, height: h, isMp3: false, isImage: true,
+                  contentType: def.contentType,
+                  fileUrl: first.fileUrl,
+                  status: 'queued',
+                  prompt: item.prompt,
+                  imageModel: item.settings.model,
+                  source: 'github-image-studio',
+                  createdAt: Date.now()
+                };
+                if (item.type !== 'SINGLE') { base.files = files; base.setName = item.concept; }
+                // title/tags/category intentionally omitted → the Gemini-Web metadata job fills them in.
+                const key = await firebasePush(db.url, queuePath, base);
+                item.distributed.push({ dbName: db.name, key, at: Date.now() });
+                log(`🔥 [${db.name}] Firebase key ${key} ← ${item.folder} (${def.contentType})`);
+                saveState();
+              } catch (e) {
+                failures.push(`${db.name}: ${e.message}`);
+                log(`❌ [${db.name}] distribute ${item.folder}: ${e.message}`);
+              }
+            }
+            item.distributeStatus = failures.length ? (item.distributed.length ? 'partial' : 'failed') : 'done';
+            item.distributeError = failures.join(' · ');
+            lastActivity = Date.now(); saveState();
+            if (failures.length) throw new Error(failures.join(' · '));
+          }
+
+          // ─── ZIP / METADATA EXPORT ─────────────────────────────────────────────────
+          function writeExports() {
+            const metadata = state.items.filter(i => i.frames.some(f => f.status === 'done')).map(i => ({
+              folder: i.folder, file: i.metadata.file, title: i.metadata.title, tags: i.metadata.tags, category: i.metadata.category, description: i.metadata.description,
+              type: i.type, contentType: SET_FRAMES[i.type].contentType, prompt: i.prompt, model: i.settings.model,
+              distributed: i.distributed
+            }));
+            fs.writeFileSync(path.join(OUT_DIR, 'metadata.json'), JSON.stringify(metadata, null, 2));
+            const pdir = path.join(OUT_DIR, 'prompts'); fs.mkdirSync(pdir, { recursive: true });
+            for (const i of state.items) fs.writeFileSync(path.join(pdir, `${i.folder}.txt`), [i.prompt, grading(i.settings), BASE_RULES].filter(Boolean).join('\n\n'));
+          }
+          function buildZip() {
+            writeExports();
+            const zipPath = '/tmp/zedge_upload.zip';
+            try { fs.unlinkSync(zipPath); } catch {}
+            execSync(`cd "${OUT_DIR}" && zip -q -r "${zipPath}" . -x "studio_state.json"`, { stdio: 'pipe' });
+            return zipPath;
+          }
+
+          // ─── FINISH ────────────────────────────────────────────────────────────────
+          function finish(reason) {
+            if (state.finished) return;
+            state.finished = true; state.finishReason = reason;
+            log(`🏁 Session finished: ${reason}`);
+            try { writeExports(); } catch {}
+            const generated = state.items.filter(i => i.status === 'done').length;
+            const frames = state.items.reduce((n, i) => n + i.frames.filter(f => f.status === 'done').length, 0);
+            const distributed = state.items.filter(i => i.distributed.length > 0).length;
+            const records = state.items.reduce((n, i) => n + i.distributed.length, 0);
+            const result = { reason, items: state.items.length, generated, frames, distributed, records, runMetadata: !!state.settings.runMetadata && records > 0, targetAccount: state.settings.targetAccount, queuePath: state.settings.queuePath };
+            fs.writeFileSync(RESULT_FILE, JSON.stringify(result, null, 2));
+            saveState();
+            setTimeout(() => process.exit(0), 1500);
+          }
+          setInterval(() => {
+            if (state.finished) return;
+            if (Date.now() >= deadline) return finish('session timeout reached');
+            const idleMin = parseInt(state.settings.autoFinishMinutes, 10) || 0;
+            if (idleMin > 0 && state.items.length) {
+              const busy = state.items.some(i => i.status === 'queued' || i.status === 'running' || i.distributeStatus === 'running');
+              const allDistributed = state.items.filter(i => i.status === 'done').every(i => i.distributed.length > 0);
+              if (!busy && (allDistributed || !state.settings.autoDistribute) && Date.now() - lastActivity > idleMin * 60000) {
+                return finish(`idle for ${idleMin} min after all work completed`);
+              }
+            }
+          }, 10000);
+
+          // ─── HTTP ──────────────────────────────────────────────────────────────────
+          const json = (res, code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(obj)); };
+          const readBody = req => new Promise((resolve, reject) => { let d = ''; req.on('data', c => { d += c; if (d.length > 5e6) req.destroy(); }); req.on('end', () => { try { resolve(d ? JSON.parse(d) : {}); } catch (e) { reject(new Error('invalid JSON body')); } }); req.on('error', reject); });
+          function authed(req, url) {
+            const q = url.searchParams.get('k');
+            if (q && q === TOKEN) return 'query';
+            const m = (req.headers.cookie || '').match(/(?:^|;\s*)sk=([a-f0-9]+)/);
+            return m && m[1] === TOKEN ? 'cookie' : false;
+          }
+          function publicState() {
+            return {
+              ...state,
+              items: state.items.map(i => ({ ...i, frames: i.frames.map(f => ({ ...f, localPath: undefined, thumb: f.status === 'done' ? `/files/${encodeURIComponent(i.folder)}/${encodeURIComponent(f.file)}` : '' })) })),
+              creds: { ok: hasCreds(), cloud_name: creds.cloud_name, api_key: creds.api_key ? creds.api_key.slice(0, 4) + '…' : '' },
+              models: TEXT_MODELS, editModels: EDIT_MODELS, ratios: Object.keys(RATIOS), accounts: [...Object.keys(FIREBASE_DB_MAP), 'all_accounts'],
+              startedAt, deadline, now: Date.now(), inFlight,
+              totals: {
+                items: state.items.length,
+                frames: state.items.reduce((n, i) => n + i.frames.length, 0),
+                framesDone: state.items.reduce((n, i) => n + i.frames.filter(f => f.status === 'done').length, 0),
+                itemsDone: state.items.filter(i => i.status === 'done').length,
+                distributed: state.items.filter(i => i.distributed.length > 0).length
+              }
+            };
+          }
+          function parsePrompts(body) {
+            const text = String(body.text || '').trim();
+            if (!text) throw new Error('Paste at least one prompt.');
+            const copies = Math.max(1, Math.min(10, parseInt(body.copies, 10) || 1));
+            const defType = TYPE_ALIAS[String(body.type || 'SINGLE').toUpperCase().replace(/[\s_]/g, '')] || 'SINGLE';
+            let items = null;
+            if (/^[\[{]/.test(text)) {
+              try { const j = JSON.parse(text); items = Array.isArray(j) ? j : Array.isArray(j.sets) ? j.sets : Array.isArray(j.prompts) ? j.prompts : [j]; } catch (e) { throw new Error('JSON could not be parsed: ' + e.message); }
+            }
+            if (!items) {
+              // one prompt per line; optional "TYPE | concept | prompt" shorthand
+              items = text.split('\n').map(l => l.trim()).filter(Boolean).map(l => {
+                const p = l.split('|').map(x => x.trim());
+                if (p.length >= 2 && TYPE_ALIAS[p[0].toUpperCase().replace(/[\s_]/g, '')]) return p.length === 2 ? { type: p[0], prompt: p[1] } : { type: p[0], concept: p[1], prompt: p.slice(2).join(' | ') };
+                return { prompt: l };
+              });
+            }
+            const out = [], problems = [];
+            items.forEach((it, i) => {
+              if (typeof it === 'string') it = { prompt: it };
+              if (!it || typeof it !== 'object') return problems.push(`#${i + 1}: not an object`);
+              const type = it.type || it.set ? TYPE_ALIAS[String(it.type || it.set).toUpperCase().replace(/[\s_]/g, '')] : defType;
+              const prompt = String(it.prompt || it.description || '').trim();
+              if (!type) return problems.push(`#${i + 1}: unknown type "${it.type || it.set}"`);
+              if (!prompt) return problems.push(`#${i + 1}: missing prompt`);
+              const settings = {};
+              if (it.model && TEXT_MODELS.includes(String(it.model))) settings.model = String(it.model);
+              if (['1K', '2K'].includes(String(it.res || it.resolution || '').toUpperCase())) settings.res = String(it.res || it.resolution).toUpperCase();
+              if (BOOST[String(it.boost || '').toLowerCase()]) settings.boost = String(it.boost).toLowerCase();
+              if (DISPLAY[String(it.display || '').toLowerCase()] !== undefined) settings.display = String(it.display).toLowerCase();
+              if (STRENGTH[String(it.strength || '').toLowerCase()]) settings.strength = String(it.strength).toLowerCase();
+              if (RATIOS[String(it.ratio || '')]) settings.ratio = String(it.ratio);
+              if (typeof it.upscale === 'boolean') settings.upscale = it.upscale;
+              const concept = String(it.concept || it.name || it.title || '').trim();
+              for (let c = 0; c < copies; c++) out.push({ type, prompt, concept: copies > 1 && concept ? `${concept} v${c + 1}` : concept, settings });
+            });
+            return { out, problems };
+          }
+
+          const server = http.createServer(async (req, res) => {
+            const url = new URL(req.url, `http://localhost:${PORT}`);
+            const p = url.pathname;
+            if (p === '/healthz') return json(res, 200, { ok: true, finished: state.finished });
+            const auth = authed(req, url);
+            if (!auth) {
+              res.writeHead(401, { 'Content-Type': 'text/html; charset=utf-8' });
+              return res.end('<!doctype html><body style="font-family:system-ui;background:#0b0f14;color:#eee;display:grid;place-items:center;height:100vh"><div><h2>🔒 Image Studio</h2><p>Open the exact link printed in the GitHub Actions log (it contains <code>?k=…</code>).</p></div></body>');
+            }
+            try {
+              if (p === '/' || p === '/index.html') {
+                const headers = { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' };
+                if (auth === 'query') headers['Set-Cookie'] = `sk=${TOKEN}; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400`;
+                res.writeHead(200, headers);
+                return res.end(PANEL_HTML);
+              }
+              if (p.startsWith('/files/')) {
+                const rel = decodeURIComponent(p.slice(7)).replace(/\.\./g, '');
+                const fp = path.join(OUT_DIR, rel);
+                if (!fp.startsWith(OUT_DIR) || !fs.existsSync(fp)) { res.writeHead(404); return res.end('not found'); }
+                res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Cache-Control': 'private, max-age=3600' });
+                return fs.createReadStream(fp).pipe(res);
+              }
+              if (p === '/api/state') return json(res, 200, publicState());
+              if (p === '/api/zip') {
+                const zp = buildZip();
+                res.writeHead(200, { 'Content-Type': 'application/zip', 'Content-Disposition': 'attachment; filename="zedge_upload.zip"', 'Content-Length': fs.statSync(zp).size });
+                return fs.createReadStream(zp).pipe(res);
+              }
+              if (req.method !== 'POST') return json(res, 404, { error: 'not found' });
+              const body = await readBody(req);
+              lastActivity = Date.now();
+
+              if (p === '/api/settings') {
+                const s = body.settings || {};
+                if (s.model && TEXT_MODELS.includes(s.model)) state.settings.model = s.model;
+                if (['1K', '2K'].includes(s.res)) state.settings.res = s.res;
+                if (RATIOS[s.ratio]) state.settings.ratio = s.ratio;
+                if (BOOST[s.boost]) state.settings.boost = s.boost;
+                if (DISPLAY[s.display] !== undefined) state.settings.display = s.display;
+                if (STRENGTH[s.strength]) state.settings.strength = s.strength;
+                if (typeof s.upscale === 'boolean') state.settings.upscale = s.upscale;
+                if (s.concurrency) state.settings.concurrency = Math.max(1, Math.min(4, parseInt(s.concurrency, 10) || 1));
+                if (s.targetAccount && (FIREBASE_DB_MAP[s.targetAccount] || s.targetAccount === 'all_accounts')) state.settings.targetAccount = s.targetAccount;
+                if (typeof s.queuePath === 'string' && /^[A-Za-z0-9_\/-]{1,80}$/.test(s.queuePath.trim())) state.settings.queuePath = s.queuePath.trim();
+                if (typeof s.autoDistribute === 'boolean') state.settings.autoDistribute = s.autoDistribute;
+                if (typeof s.runMetadata === 'boolean') state.settings.runMetadata = s.runMetadata;
+                if (s.autoFinishMinutes !== undefined) state.settings.autoFinishMinutes = Math.max(0, Math.min(300, parseInt(s.autoFinishMinutes, 10) || 0));
+                const c = body.credentials || {};
+                if (c.cloud_name && c.api_key && c.api_secret) {
+                  if (!/^[A-Za-z0-9_-]{2,100}$/.test(String(c.cloud_name).trim())) throw new Error('Cloud name contains unsupported characters.');
+                  creds.cloud_name = String(c.cloud_name).trim(); creds.api_key = String(c.api_key).trim(); creds.api_secret = String(c.api_secret).trim();
+                  log('🔑 Cloudinary credentials updated from panel');
+                }
+                saveState(); pump();
+                return json(res, 200, { ok: true, settings: state.settings, creds: { ok: hasCreds() } });
+              }
+              if (p === '/api/prompts') {
+                const { out, problems } = parsePrompts(body);
+                if (!out.length) throw new Error(problems[0] || 'Nothing to add');
+                const startIndex = state.items.length;
+                out.forEach((o, i) => state.items.push(buildItem(o, startIndex + i + 1)));
+                const frames = out.reduce((n, o) => n + SET_FRAMES[o.type].frames.length, 0);
+                log(`📥 Added ${out.length} item(s) / ${frames} frame(s)${problems.length ? ` · ${problems.length} skipped` : ''}`);
+                saveState(); pump();
+                return json(res, 200, { ok: true, added: out.length, frames, problems, credsOk: hasCreds() });
+              }
+              if (p === '/api/retry') {
+                const item = state.items.find(i => i.id === body.id);
+                if (!item) throw new Error('item not found');
+                if (item.status === 'running') throw new Error('item is still running');
+                const which = body.frame;
+                if (typeof which === 'number') {
+                  if (!item.frames[which]) throw new Error('frame not found');
+                  item.frames[which].status = 'queued';
+                  if (which === 0) { item.anchorId = null; item.frames.forEach((f, i) => { if (i > 0) f.status = 'queued'; }); }
+                  if (which === 0 && item.frames.length > 1) log(`⟳ ${item.folder}: anchor regenerated — all variants re-queued to stay consistent`);
+                } else {
+                  item.frames.forEach(f => { if (f.status !== 'done') f.status = 'queued'; });
+                  if (item.frames[0].status !== 'done') item.anchorId = null;
+                }
+                item.status = 'queued'; item.error = ''; item.distributed = []; item.distributeStatus = ''; item.distributeError = '';
+                saveState(); pump();
+                return json(res, 200, { ok: true });
+              }
+              if (p === '/api/delete') {
+                const idx = state.items.findIndex(i => i.id === body.id);
+                if (idx < 0) throw new Error('item not found');
+                if (state.items[idx].status === 'running') throw new Error('item is still running');
+                const [it] = state.items.splice(idx, 1);
+                try { fs.rmSync(path.join(OUT_DIR, it.folder), { recursive: true, force: true }); } catch {}
+                saveState();
+                return json(res, 200, { ok: true });
+              }
+              if (p === '/api/pause') { state.paused = !!body.paused; log(state.paused ? '⏸ Queue paused' : '▶️ Queue resumed'); saveState(); pump(); return json(res, 200, { ok: true, paused: state.paused }); }
+              if (p === '/api/distribute') {
+                const target = body.target || state.settings.targetAccount;
+                targetDbs(target); // validate
+                let items = body.ids === 'all' ? state.items.filter(i => i.status === 'done') : state.items.filter(i => (body.ids || []).includes(i.id));
+                if (body.ids === 'all') items = items.filter(i => !targetDbs(target).every(db => i.distributed.some(d => d.dbName === db.name)));
+                if (!items.length) throw new Error('Nothing to distribute (only fully generated, not-yet-distributed items are sent).');
+                log(`🚀 Distributing ${items.length} item(s) → ${target}`);
+                (async () => { for (const it of items) { try { await distributeItem(it, target); } catch (e) { /* logged */ } } })();
+                return json(res, 200, { ok: true, count: items.length });
+              }
+              if (p === '/api/finish') { json(res, 200, { ok: true }); return finish('finished from panel'); }
+              return json(res, 404, { error: 'not found' });
+            } catch (e) {
+              return json(res, 400, { error: e.message });
+            }
+          });
+
+          // ─── PANEL (single HTML page; polls /api/state) ────────────────────────────
+          const PANEL_HTML = `<!doctype html>
+          <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+          <title>Image Studio · Runner Panel</title>
+          <style>
+          :root{--bg:#0a0d13;--bg2:#0e1219;--surface:#131822;--raised:#1a2130;--line:rgba(255,255,255,.09);--line2:rgba(255,255,255,.16);--txt:#f3f5f9;--muted:rgba(255,255,255,.62);--faint:rgba(255,255,255,.4);
+          --acc:#6d8cff;--acc2:#38d6ff;--grad:linear-gradient(135deg,#6d8cff 0%,#38d6ff 100%);--ok:#3ecf8e;--warn:#f5b63d;--err:#ff6b6b;--violet:#a78bfa;--r:12px;--r2:8px}
+          *{box-sizing:border-box}html{scroll-behavior:smooth}
+          body{margin:0;font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,Helvetica,Arial,sans-serif;background:var(--bg);color:var(--txt);-webkit-font-smoothing:antialiased;
+          background-image:radial-gradient(1200px 600px at 10% -10%,rgba(109,140,255,.14),transparent 60%),radial-gradient(900px 500px at 100% 0%,rgba(56,214,255,.10),transparent 60%);background-attachment:fixed}
+          a{color:var(--acc2)}button{font:inherit}code,kbd{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;background:rgba(255,255,255,.07);padding:1px 6px;border-radius:5px;color:#cfd6e4}
+          ::selection{background:rgba(109,140,255,.35)}
+          /* ─── header ─── */
+          .top{position:sticky;top:0;z-index:20;backdrop-filter:blur(14px);background:rgba(10,13,19,.72);border-bottom:1px solid var(--line)}
+          .top .in{max-width:1560px;margin:0 auto;padding:12px 24px;display:flex;align-items:center;gap:20px;flex-wrap:wrap}
+          .brand{display:flex;align-items:center;gap:12px;margin-right:auto}
+          .logo{width:38px;height:38px;border-radius:11px;background:var(--grad);display:grid;place-items:center;box-shadow:0 8px 24px rgba(109,140,255,.35);position:relative;overflow:hidden}
+          .logo::after{content:"";position:absolute;inset:0;background:linear-gradient(180deg,rgba(255,255,255,.35),transparent 55%)}
+          .logo svg{width:20px;height:20px;position:relative;z-index:1}
+          .brand h1{margin:0;font-size:17px;font-weight:700;letter-spacing:-.01em;line-height:1.15}
+          .brand small{display:block;font-size:12px;color:var(--muted);font-weight:500}
+          .cloud{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);background:rgba(255,255,255,.05);border:1px solid var(--line);padding:4px 10px;border-radius:999px}
+          .cloud i{width:7px;height:7px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 3px rgba(62,207,142,.18)}
+          .cloud.off i{background:var(--err);box-shadow:0 0 0 3px rgba(255,107,107,.18)}
+          .kpis{display:flex;gap:8px;flex-wrap:wrap}
+          .kpi{display:flex;align-items:center;gap:10px;padding:6px 12px 6px 8px;background:rgba(255,255,255,.04);border:1px solid var(--line);border-radius:10px;min-width:118px}
+          .kpi .ring{width:34px;height:34px;flex:none}
+          .kpi .ring circle{fill:none;stroke-width:3.5}
+          .kpi .ring .bg{stroke:rgba(255,255,255,.08)}
+          .kpi .ring .fg{stroke:url(#g1);stroke-linecap:round;transition:stroke-dashoffset .6s ease}
+          .kpi .ring.t .fg{stroke:var(--warn)}
+          .kpi b{display:block;font-size:15px;line-height:1.1;letter-spacing:-.01em}
+          .kpi span{display:block;font-size:11px;color:var(--faint);text-transform:uppercase;letter-spacing:.06em;margin-top:2px}
+          .actions{display:flex;gap:8px}
+          .btn{display:inline-flex;align-items:center;justify-content:center;gap:7px;min-height:38px;padding:0 14px;border-radius:10px;border:1px solid transparent;cursor:pointer;font-weight:600;font-size:13px;transition:transform .12s ease,box-shadow .2s ease,background .2s;white-space:nowrap}
+          .btn:active{transform:translateY(1px)}.btn:disabled{opacity:.45;cursor:not-allowed;transform:none}
+          .btn.pri{background:var(--grad);color:#0a0d13;box-shadow:0 6px 18px rgba(109,140,255,.35)}.btn.pri:hover{box-shadow:0 8px 26px rgba(109,140,255,.5)}
+          .btn.sec{background:rgba(255,255,255,.06);color:var(--txt);border-color:var(--line2)}.btn.sec:hover{background:rgba(255,255,255,.1)}
+          .btn.warn{background:rgba(245,182,61,.12);color:#ffd27a;border-color:rgba(245,182,61,.35)}.btn.warn:hover{background:rgba(245,182,61,.2)}
+          .btn.danger{background:rgba(255,107,107,.12);color:#ff9b9b;border-color:rgba(255,107,107,.3)}.btn.danger:hover{background:rgba(255,107,107,.2)}
+          .btn.sm{min-height:32px;padding:0 11px;font-size:12px;border-radius:8px}
+          .btn.icon{width:32px;padding:0}
+          .btn svg{width:15px;height:15px}
+          /* ─── layout ─── */
+          .wrap{max-width:1560px;margin:0 auto;padding:20px 24px 80px;display:grid;grid-template-columns:400px minmax(0,1fr);gap:20px;align-items:start}
+          @media(max-width:1040px){.wrap{grid-template-columns:1fr}.side{position:static!important}}
+          .side{position:sticky;top:78px;display:flex;flex-direction:column;gap:16px}
+          .card{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);box-shadow:0 1px 2px rgba(0,0,0,.2),0 12px 40px rgba(0,0,0,.25)}
+          /* ─── tabs ─── */
+          .tabs{display:flex;gap:4px;padding:6px;border-bottom:1px solid var(--line);background:rgba(255,255,255,.02);border-radius:var(--r) var(--r) 0 0}
+          .tab{flex:1;min-height:38px;border:0;background:transparent;color:var(--muted);border-radius:8px;font-weight:600;font-size:12.5px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:6px;transition:.2s}
+          .tab:hover{color:var(--txt);background:rgba(255,255,255,.04)}.tab.on{color:var(--txt);background:var(--raised);box-shadow:inset 0 0 0 1px var(--line2)}
+          .tab .n{width:18px;height:18px;border-radius:6px;background:rgba(255,255,255,.08);display:grid;place-items:center;font-size:11px;color:var(--faint)}
+          .tab.on .n{background:var(--grad);color:#0a0d13}
+          .pane{display:none;padding:18px}.pane.on{display:block;animation:fade .25s ease}
+          @keyframes fade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+          .pane h3{margin:0 0 4px;font-size:15px;letter-spacing:-.01em}.pane p.lead{margin:0 0 14px;color:var(--muted);font-size:13px}
+          label.l{display:flex;justify-content:space-between;font-size:12px;color:var(--muted);margin:12px 0 6px;font-weight:500}label.l:first-child{margin-top:0}
+          input,select,textarea{width:100%;background:var(--bg2);border:1px solid var(--line2);color:var(--txt);border-radius:var(--r2);padding:10px 12px;font:inherit;font-size:13.5px;min-height:42px;outline:none;transition:border-color .15s,box-shadow .15s}
+          input:focus,select:focus,textarea:focus{border-color:var(--acc);box-shadow:0 0 0 3px rgba(109,140,255,.22)}
+          select{appearance:none;background-image:linear-gradient(45deg,transparent 50%,var(--muted) 50%),linear-gradient(135deg,var(--muted) 50%,transparent 50%);background-position:calc(100% - 18px) 50%,calc(100% - 13px) 50%;background-size:5px 5px;background-repeat:no-repeat;padding-right:32px}
+          textarea{min-height:190px;resize:vertical;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px;line-height:1.55}
+          .g2{display:grid;grid-template-columns:1fr 1fr;gap:10px}.g3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}
+          .seg{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}
+          .seg input{display:none}.seg label{display:flex;flex-direction:column;align-items:center;gap:2px;padding:9px 6px;border:1px solid var(--line2);border-radius:var(--r2);cursor:pointer;font-size:12px;font-weight:600;color:var(--muted);background:var(--bg2);transition:.15s;text-align:center;min-height:52px;justify-content:center}
+          .seg label em{font-style:normal;font-size:10.5px;color:var(--faint);font-weight:500}
+          .seg input:checked+label{border-color:var(--acc);color:var(--txt);background:rgba(109,140,255,.12);box-shadow:0 0 0 1px var(--acc) inset}
+          .sw{display:flex;align-items:center;gap:12px;padding:10px 0;border-top:1px solid var(--line);cursor:pointer;font-size:13px}
+          .sw:first-of-type{border-top:0}.sw span.t{flex:1}.sw span.t small{display:block;color:var(--faint);font-size:11.5px}
+          .sw input{display:none}.sw .k{width:38px;height:22px;border-radius:11px;background:rgba(255,255,255,.12);position:relative;transition:.2s;flex:none}
+          .sw .k::after{content:"";position:absolute;top:3px;left:3px;width:16px;height:16px;border-radius:50%;background:#fff;transition:.2s}
+          .sw input:checked+.k{background:var(--acc)}.sw input:checked+.k::after{left:19px}
+          .hint{font-size:12px;color:var(--faint);margin-top:8px;line-height:1.5}
+          .msg{font-size:12.5px;margin-top:10px;padding:9px 11px;border-radius:8px;background:rgba(255,255,255,.04);border:1px solid var(--line);color:var(--muted);display:none}
+          .msg.on{display:block}.msg.ok{border-color:rgba(62,207,142,.35);color:#9ef0c6;background:rgba(62,207,142,.08)}.msg.bad{border-color:rgba(255,107,107,.35);color:#ffb3b3;background:rgba(255,107,107,.08)}
+          .foot{display:flex;gap:10px;align-items:center;margin-top:14px;flex-wrap:wrap}
+          .chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}.chip{font-size:11.5px;padding:4px 9px;border-radius:999px;background:rgba(255,255,255,.05);border:1px solid var(--line);color:var(--muted);cursor:pointer}.chip:hover{color:var(--txt);border-color:var(--line2)}
+          /* ─── collection ─── */
+          .col-h{display:flex;align-items:center;gap:12px;padding:16px 18px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+          .col-h h2{margin:0;font-size:16px;letter-spacing:-.01em;display:flex;align-items:center;gap:10px}
+          .status{font-size:12px;color:var(--muted);font-weight:500;display:inline-flex;align-items:center;gap:6px}
+          .status i{width:8px;height:8px;border-radius:50%;background:var(--faint)}.status.run i{background:var(--warn);animation:pulse 1.2s infinite}.status.done i{background:var(--ok)}.status.paused i{background:var(--acc2)}
+          @keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(245,182,61,.5)}70%{box-shadow:0 0 0 6px rgba(245,182,61,0)}}
+          .filters{display:flex;gap:4px;margin-left:auto;background:rgba(255,255,255,.04);padding:4px;border-radius:9px;border:1px solid var(--line)}
+          .filters button{border:0;background:transparent;color:var(--muted);font-size:12px;font-weight:600;padding:5px 10px;border-radius:6px;cursor:pointer}
+          .filters button.on{background:var(--raised);color:var(--txt)}.filters button b{color:var(--faint);font-weight:600;margin-left:4px}
+          .progress{height:4px;background:rgba(255,255,255,.06)}.progress i{display:block;height:100%;background:var(--grad);width:0;transition:width .5s ease;box-shadow:0 0 12px rgba(56,214,255,.6)}
+          .banner{margin:16px 18px 0;padding:14px 16px;border-radius:10px;border:1px solid rgba(245,182,61,.35);background:rgba(245,182,61,.08);color:#ffe0a3;font-size:13px;display:none}.banner.on{display:block}
+          .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:14px;padding:18px}
+          @media(max-width:560px){.grid{grid-template-columns:1fr;padding:12px}}
+          .item{background:var(--bg2);border:1px solid var(--line);border-radius:var(--r);overflow:hidden;position:relative;transition:border-color .2s,transform .2s;display:flex;flex-direction:column}
+          .item:hover{border-color:var(--line2)}
+          .item.running{border-color:rgba(245,182,61,.4)}.item.running::before{content:"";position:absolute;inset:-1px;border-radius:var(--r);padding:1px;background:linear-gradient(120deg,transparent 30%,rgba(245,182,61,.8),transparent 70%);-webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);-webkit-mask-composite:xor;mask-composite:exclude;animation:spin 2.2s linear infinite;pointer-events:none;background-size:300% 300%}
+          @keyframes spin{0%{background-position:0% 50%}100%{background-position:300% 50%}}
+          .item.failed,.item.partial{border-color:rgba(255,107,107,.35)}
+          .ih{display:flex;align-items:center;gap:10px;padding:12px 14px 10px}
+          .idx{width:30px;height:30px;border-radius:8px;display:grid;place-items:center;font-size:12px;font-weight:700;background:rgba(255,255,255,.06);color:var(--muted);flex:none;font-variant-numeric:tabular-nums}
+          .ttl{flex:1;min-width:0}.ttl b{display:block;font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;letter-spacing:-.01em}
+          .ttl small{display:flex;gap:6px;align-items:center;color:var(--faint);font-size:11.5px;margin-top:2px;flex-wrap:wrap}
+          .type{font-size:10.5px;font-weight:700;letter-spacing:.06em;padding:2px 7px;border-radius:5px;text-transform:uppercase}
+          .type.SINGLE{background:rgba(109,140,255,.16);color:#b4c4ff}.type.T24{background:rgba(245,182,61,.16);color:#ffd27a}.type.DUAL{background:rgba(167,139,250,.18);color:#d5c8ff}.type.BATTERY{background:rgba(62,207,142,.16);color:#9ef0c6}
+          .st{font-size:11px;font-weight:700;padding:3px 8px;border-radius:999px;display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
+          .st.queued{background:rgba(255,255,255,.07);color:var(--muted)}.st.running{background:rgba(245,182,61,.15);color:#ffd27a}.st.done{background:rgba(62,207,142,.15);color:#9ef0c6}.st.failed,.st.partial{background:rgba(255,107,107,.15);color:#ffb3b3}
+          .st.dist{background:rgba(56,214,255,.14);color:#9de9ff}
+          .ring2{width:30px;height:30px;flex:none}.ring2 circle{fill:none;stroke-width:3}.ring2 .bg{stroke:rgba(255,255,255,.08)}.ring2 .fg{stroke:var(--ok);stroke-linecap:round;transition:stroke-dashoffset .5s}
+          .strip{display:grid;gap:6px;padding:0 14px;grid-template-columns:repeat(4,1fr)}
+          .strip[data-n="6"]{grid-template-columns:repeat(6,1fr)}
+          .strip .beside{grid-column:span 3;display:flex;flex-direction:column;gap:8px;min-width:0;padding:2px 0 2px 6px}
+          .strip[data-n="2"] .beside{grid-column:span 2}
+          .strip .beside .prompt{padding:0;-webkit-line-clamp:5}
+          .strip .beside .meta2{font-size:11.5px;color:var(--faint);display:flex;gap:6px;flex-wrap:wrap;margin-top:auto}
+          .fr{position:relative;border-radius:8px;overflow:hidden;background:var(--surface);aspect-ratio:9/16;border:1px solid var(--line)}
+          .fr.sq{aspect-ratio:1}.fr.land{aspect-ratio:16/9}
+          .fr img{width:100%;height:100%;object-fit:cover;display:block;cursor:zoom-in;transition:transform .3s}.fr:hover img{transform:scale(1.04)}
+          .fr .cap{position:absolute;left:0;right:0;bottom:0;padding:14px 6px 5px;font-size:10px;color:#fff;background:linear-gradient(transparent,rgba(0,0,0,.75));pointer-events:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+          .fr .ph{position:absolute;inset:0;display:grid;place-items:center;font-size:10.5px;color:var(--faint);text-align:center;padding:6px}
+          .fr.running .ph{color:#ffd27a}.fr.running::after{content:"";position:absolute;inset:0;background:linear-gradient(110deg,transparent 30%,rgba(255,255,255,.07) 50%,transparent 70%);background-size:200% 100%;animation:shimmer 1.4s infinite}
+          @keyframes shimmer{from{background-position:200% 0}to{background-position:-200% 0}}
+          .fr.failed{border-color:rgba(255,107,107,.45)}.fr.failed .ph{color:#ffb3b3}
+          .fr .re{position:absolute;top:5px;right:5px;width:26px;height:26px;border-radius:7px;border:0;background:rgba(0,0,0,.6);color:#fff;cursor:pointer;display:grid;place-items:center;opacity:0;transition:.15s;backdrop-filter:blur(4px)}
+          .fr:hover .re,.fr.failed .re{opacity:1}.fr .re svg{width:13px;height:13px}
+          .prompt{padding:10px 14px 0;font-size:12.5px;color:var(--muted);line-height:1.5;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;cursor:pointer}
+          .prompt.open{display:block}
+          .err{margin:8px 14px 0;font-size:12px;color:#ffb3b3;background:rgba(255,107,107,.08);border:1px solid rgba(255,107,107,.25);border-radius:7px;padding:7px 10px;word-break:break-word}
+          .if{display:flex;align-items:center;gap:8px;padding:12px 14px;margin-top:auto}
+          .if .meta{flex:1;display:flex;gap:6px;flex-wrap:wrap;font-size:11.5px;color:var(--faint)}
+          .if .meta code{font-size:11px}
+          .empty{padding:70px 24px;text-align:center;color:var(--muted)}
+          .empty .phones{display:flex;justify-content:center;gap:10px;margin-bottom:22px}
+          .empty .phones i{width:46px;height:82px;border-radius:10px;border:1px solid var(--line2);background:linear-gradient(160deg,rgba(109,140,255,.25),rgba(56,214,255,.05));position:relative;animation:float 4s ease-in-out infinite}
+          .empty .phones i:nth-child(2){animation-delay:.6s;background:linear-gradient(160deg,rgba(245,182,61,.3),rgba(255,107,107,.05))}.empty .phones i:nth-child(3){animation-delay:1.2s;background:linear-gradient(160deg,rgba(167,139,250,.3),rgba(56,214,255,.05))}.empty .phones i:nth-child(4){animation-delay:1.8s;background:linear-gradient(160deg,rgba(62,207,142,.3),rgba(109,140,255,.05))}
+          .empty .phones i::before{content:"";position:absolute;top:6px;left:50%;transform:translateX(-50%);width:14px;height:3px;border-radius:2px;background:rgba(255,255,255,.25)}
+          @keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-6px)}}
+          .empty h4{margin:0 0 6px;font-size:16px;color:var(--txt)}.empty p{margin:0;font-size:13px;max-width:420px;margin-inline:auto}
+          /* ─── console ─── */
+          .console{position:fixed;left:0;right:0;bottom:0;z-index:15;background:rgba(10,13,19,.92);backdrop-filter:blur(12px);border-top:1px solid var(--line2);transform:translateY(calc(100% - 40px));transition:transform .3s ease}
+          .console.open{transform:none}
+          .console .bar{height:40px;display:flex;align-items:center;gap:12px;padding:0 24px;cursor:pointer;user-select:none;font-size:12.5px;color:var(--muted)}
+          .console .bar b{color:var(--txt);font-weight:600}.console .bar .last{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;color:var(--faint)}
+          .console .bar .dot{width:8px;height:8px;border-radius:50%;background:var(--ok)}
+          .console pre{margin:0;height:240px;overflow:auto;padding:6px 24px 16px;font:12px/1.65 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:#b9c2d3;white-space:pre-wrap}
+          .console pre .ok{color:#9ef0c6}.console pre .er{color:#ffb3b3}.console pre .wn{color:#ffd27a}.console pre .in{color:#9de9ff}.console pre .ts{color:var(--faint)}
+          /* ─── lightbox / toast ─── */
+          .lb{position:fixed;inset:0;z-index:50;background:rgba(5,7,10,.92);display:none;place-items:center;padding:24px;cursor:zoom-out}
+          .lb.on{display:grid;animation:fade .2s}.lb img{max-width:min(94vw,560px);max-height:92vh;border-radius:14px;box-shadow:0 30px 90px rgba(0,0,0,.7)}
+          .lb .cap{position:absolute;bottom:18px;left:0;right:0;text-align:center;color:var(--muted);font-size:13px}
+          .toasts{position:fixed;top:76px;right:24px;z-index:60;display:flex;flex-direction:column;gap:8px;pointer-events:none}
+          .toast{background:var(--raised);border:1px solid var(--line2);color:var(--txt);padding:10px 14px;border-radius:10px;font-size:13px;box-shadow:0 12px 30px rgba(0,0,0,.4);animation:tin .25s ease;max-width:360px}
+          .toast.bad{border-color:rgba(255,107,107,.45)}.toast.good{border-color:rgba(62,207,142,.45)}
+          @keyframes tin{from{opacity:0;transform:translateX(12px)}to{opacity:1;transform:none}}
+          .done-banner{margin:16px 18px 0;padding:16px 18px;border-radius:12px;background:linear-gradient(135deg,rgba(62,207,142,.16),rgba(56,214,255,.1));border:1px solid rgba(62,207,142,.35);color:#d9fbe9;font-size:13.5px;display:none}.done-banner.on{display:block}
+          .done-banner b{display:block;font-size:15px;margin-bottom:4px;color:#fff}
+          @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+          @media(max-width:640px){.top .in{padding:10px 14px;gap:10px}.wrap{padding:14px 14px 80px}.kpis{width:100%;order:3;display:grid;grid-template-columns:1fr 1fr;gap:8px}.kpi{min-width:0;padding:8px 10px}.kpi b{font-size:14px}.kpi span{font-size:10px;white-space:normal;line-height:1.2}.actions{margin-left:auto}.brand small{display:none}.console .bar,.console pre{padding-left:14px;padding-right:14px}.strip[data-n="6"]{grid-template-columns:repeat(3,1fr)}}
+          </style></head><body>
+          <svg width="0" height="0" style="position:absolute"><defs><linearGradient id="g1" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#6d8cff"/><stop offset="1" stop-color="#38d6ff"/></linearGradient></defs></svg>
+          <header class="top"><div class="in">
+           <div class="brand"><div class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="#0a0d13" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="3"/><circle cx="9" cy="10" r="1.6"/><path d="M21 16l-5-5-9 9"/></svg></div>
+            <div><h1>Image Studio <span class="cloud off" id="credPill"><i></i><span id="credTxt">no credentials</span></span></h1><small>Runs on the GitHub runner · exposed through Cloudflare tunnel</small></div></div>
+           <div class="kpis">
+            <div class="kpi"><svg class="ring" viewBox="0 0 36 36"><circle class="bg" cx="18" cy="18" r="15"/><circle class="fg" id="rFrames" cx="18" cy="18" r="15" stroke-dasharray="94.2" stroke-dashoffset="94.2"/></svg><div><b id="tFrames">0 / 0</b><span>frames</span></div></div>
+            <div class="kpi"><div style="width:34px;height:34px;border-radius:9px;background:rgba(109,140,255,.15);display:grid;place-items:center;color:#b4c4ff;font-weight:700;font-size:13px" id="tItems">0</div><div><b id="tItemsDone">0 done</b><span>items</span></div></div>
+            <div class="kpi"><div style="width:34px;height:34px;border-radius:9px;background:rgba(56,214,255,.14);display:grid;place-items:center"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#9de9ff" stroke-width="2.2" stroke-linecap="round"><path d="M12 3c3 4 5 6.5 5 9.5a5 5 0 0 1-10 0c0-1.6.6-3 1.6-4.4.3 1.2 1 2 1.9 2.4C10.8 8.6 11.6 5.6 12 3z"/></svg></div><div><b id="tDist">0</b><span>distributed</span></div></div>
+            <div class="kpi"><svg class="ring t" viewBox="0 0 36 36"><circle class="bg" cx="18" cy="18" r="15"/><circle class="fg" id="rTime" cx="18" cy="18" r="15" stroke-dasharray="94.2" stroke-dashoffset="0"/></svg><div><b id="tLeft">–</b><span>session left</span></div></div>
+           </div>
+           <div class="actions">
+            <button class="btn sec sm" id="pauseBtn" title="Pause / resume the generation queue"><svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg><span>Pause</span></button>
+            <a class="btn sec sm" href="/api/zip" title="Download everything generated so far"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0l-4-4m4 4l4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>ZIP</a>
+            <button class="btn danger sm" id="finishBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 21V4"/><path d="M5 4h12l-2 4 2 4H5"/></svg>Finish session</button>
+           </div>
+          </div></header>
+
+          <main class="wrap">
+          <aside class="side">
+           <section class="card">
+            <nav class="tabs" role="tablist">
+             <button class="tab on" data-pane="pPrompts"><span class="n">1</span>Prompts</button>
+             <button class="tab" data-pane="pGen"><span class="n">2</span>Generate</button>
+             <button class="tab" data-pane="pDist"><span class="n">3</span>Distribute</button>
+             <button class="tab" data-pane="pCred"><span class="n">4</span>Keys</button>
+            </nav>
+            <div class="pane on" id="pPrompts">
+             <h3>Bulk prompts</h3><p class="lead">One prompt per line. Every line becomes a set or a single wallpaper and starts generating immediately.</p>
+             <label class="l">Set type for plain lines</label>
+             <div class="seg">
+              <input type="radio" name="ptype" id="ty1" value="SINGLE" checked><label for="ty1">Single<em>1 frame</em></label>
+              <input type="radio" name="ptype" id="ty2" value="24-HOUR"><label for="ty2">24‑Hour<em>4 frames</em></label>
+              <input type="radio" name="ptype" id="ty3" value="DUAL"><label for="ty3">Dual<em>lock + home</em></label>
+              <input type="radio" name="ptype" id="ty4" value="BATTERY"><label for="ty4">Battery<em>6 frames</em></label>
+             </div>
+             <label class="l"><span>Prompts</span><span id="lineCount">0 lines</span></label>
+             <textarea id="ptext" spellcheck="false" placeholder="Neon koi fish gliding through a glowing cyber pond, bioluminescent lilies
+          BATTERY | Crystal Heart | A floating crystal heart with veins of light
+          24H | Misty Peak | A lone mountain peak rising above a sea of clouds"></textarea>
+             <div class="chips"><span class="chip" data-ins="TYPE | concept | prompt">TYPE | concept | prompt</span><span class="chip" data-ins='[{"type":"24-HOUR","concept":"Misty Peak","prompt":"…","model":"flux-2-pro"}]'>JSON import</span><span class="chip" id="clearPrompts">Clear</span></div>
+             <div class="g2" style="margin-top:12px;align-items:end">
+              <div><label class="l">Copies per prompt</label><input id="copies" type="number" min="1" max="10" value="1"></div>
+              <button class="btn pri" id="addBtn" style="min-height:42px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>Add &amp; generate</button>
+             </div>
+             <div class="msg" id="addMsg"></div>
+             <p class="hint">Shortcut: <kbd>Ctrl</kbd>+<kbd>Enter</kbd> adds the queue. Power cut? The runner keeps generating — just reopen this link.</p>
+            </div>
+            <div class="pane" id="pGen">
+             <h3>Generation defaults</h3><p class="lead">Applied to new items. JSON lines can override model, res, boost, display, strength, ratio, upscale.</p>
+             <label class="l">Model</label><select id="model"></select>
+             <div class="g3" style="margin-top:12px">
+              <div><label class="l">Resolution</label><select id="res"><option value="1K">1K · faster</option><option value="2K">2K · best</option></select></div>
+              <div><label class="l">Ratio <small>(single)</small></label><select id="ratio"></select></div>
+              <div><label class="l">Parallel</label><select id="concurrency"><option>1</option><option>2</option><option>3</option><option>4</option></select></div>
+             </div>
+             <div class="g3" style="margin-top:12px">
+              <div><label class="l">Color boost</label><select id="boost"><option value="off">Off · natural</option><option value="soft">Soft glow</option><option value="vivid">Vivid pop</option><option value="neon">Neon luxe</option><option value="ultra">Ultra impact</option></select></div>
+              <div><label class="l">Display</label><select id="display"><option value="any">Any phone</option><option value="amoled">AMOLED</option><option value="lcd">LCD</option></select></div>
+              <div><label class="l">Variation</label><select id="strength"><option value="subtle">Subtle</option><option value="clear">Clear</option><option value="strong">Strong</option></select></div>
+             </div>
+             <div style="margin-top:14px">
+              <label class="sw"><span class="t">AI upscale before crop<small><code>e_upscale</code> → 1620 × 2880 · slower but sharper</small></span><input type="checkbox" id="upscale"><span class="k"></span></label>
+             </div>
+             <div class="foot"><button class="btn pri" data-save>Save defaults</button><span class="hint" style="margin:0" id="saveMsg1"></span></div>
+            </div>
+            <div class="pane" id="pDist">
+             <h3>Distribution</h3><p class="lead">Completed items are uploaded to R2 and queued in Firebase without metadata; the Gemini‑Web job fills title / tags / category.</p>
+             <div class="g2"><div><label class="l">Target account</label><select id="target"></select></div><div><label class="l">Queue path</label><input id="queuePath"></div></div>
+             <div style="margin-top:14px">
+              <label class="sw"><span class="t">Auto‑distribute<small>Send each item as soon as all of its frames are done</small></span><input type="checkbox" id="autoDistribute"><span class="k"></span></label>
+              <label class="sw"><span class="t">Gemini‑Web metadata after finish<small>Runs the metadata job on everything distributed</small></span><input type="checkbox" id="runMetadata"><span class="k"></span></label>
+             </div>
+             <label class="l"><span>Auto‑finish after idle</span><span>minutes · 0 = manual only</span></label><input id="autoFinish" type="number" min="0" max="300">
+             <p class="hint">Loadshedding mode: turn on auto‑distribute + an idle timer, paste prompts, and walk away. The session finishes itself and hands off to metadata.</p>
+             <div class="foot"><button class="btn pri" data-save>Save distribution</button><span class="hint" style="margin:0" id="saveMsg2"></span></div>
+            </div>
+            <div class="pane" id="pCred">
+             <h3>Cloudinary keys</h3><p class="lead" id="credHint"></p>
+             <label class="l">Cloud name</label><input id="c_cloud" autocomplete="off" placeholder="my-cloud">
+             <div class="g2" style="margin-top:12px"><div><label class="l">API key</label><input id="c_key" autocomplete="off" placeholder="1234567890"></div><div><label class="l">API secret</label><input id="c_secret" type="password" autocomplete="new-password" placeholder="••••••••"></div></div>
+             <p class="hint">Keys live only in this runner's memory for the session. Tip: add <code>CLOUDINARY_CLOUD_NAME / API_KEY / API_SECRET</code> repo secrets to skip this step.</p>
+             <div class="foot"><button class="btn pri" data-save>Save keys</button><span class="hint" style="margin:0" id="saveMsg3"></span></div>
+            </div>
+           </section>
+          </aside>
+
+          <section class="card" id="collection">
+           <div class="col-h">
+            <h2>Collection <span class="status" id="status"><i></i><span>idle</span></span></h2>
+            <div class="filters" id="filters"><button class="on" data-f="all">All<b id="fAll">0</b></button><button data-f="running">Active<b id="fRun">0</b></button><button data-f="done">Done<b id="fDone">0</b></button><button data-f="failed">Failed<b id="fFail">0</b></button><button data-f="dist">Sent<b id="fDist">0</b></button></div>
+            <button class="btn sec sm" id="distAllBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>Distribute all completed</button>
+           </div>
+           <div class="progress"><i id="bar"></i></div>
+           <div class="done-banner" id="finishedBox"></div>
+           <div class="banner" id="credBanner">⚠ Add your Cloudinary keys in <b>Keys</b> — queued items start as soon as they are saved.</div>
+           <div class="grid" id="items"></div>
+           <div class="empty" id="empty"><div class="phones"><i></i><i></i><i></i><i></i></div><h4>Nothing in the collection yet</h4><p>Paste prompts on the left — singles, 24‑hour, dual or battery sets — and watch them render here frame by frame.</p></div>
+          </section>
+          </main>
+
+          <div class="console" id="console"><div class="bar" id="consoleBar"><span class="dot"></span><b>Console</b><span class="last" id="lastLog">waiting for the runner…</span><span id="consoleHint">▲ open</span></div><pre id="log"></pre></div>
+          <div class="lb" id="lb"><img id="lbImg" alt=""><div class="cap" id="lbCap"></div></div>
+          <div class="toasts" id="toasts"></div>
+
+          <script>
+          const $=s=>document.querySelector(s),$$=s=>[...document.querySelectorAll(s)];
+          const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+          const RE='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11A8 8 0 1 0 6.7 16.7"/><path d="M20 5v6h-6"/></svg>';
+          let S=null,inited=false,filter='all',openPrompts=new Set();
+          function toast(m,k){const t=document.createElement('div');t.className='toast'+(k?' '+k:'');t.textContent=m;$('#toasts').appendChild(t);setTimeout(()=>{t.style.opacity=0;t.style.transition='.3s';setTimeout(()=>t.remove(),300)},3200)}
+          async function api(p,b){const r=await fetch(p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})});const d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.error||('HTTP '+r.status));return d}
+          const fmtLeft=ms=>{const h=Math.floor(ms/3600000),m=Math.floor(ms%3600000/60000);return h?\`\${h}h \${String(m).padStart(2,'0')}m\`:\`\${m}m\`};
+          const ring=(el,frac)=>{el.style.strokeDashoffset=(94.2*(1-Math.max(0,Math.min(1,frac)))).toFixed(1)};
+          const typeCls=t=>t==='24-HOUR'?'T24':t;const fmtB=b=>b>=1048576?(b/1048576).toFixed(1)+' MB':Math.round(b/1024)+' KB';
+          const setMsg=(el,txt,cls)=>{el.textContent=txt;el.className='msg on '+(cls||'')};
+
+          /* tabs */
+          $$('.tab').forEach(b=>b.onclick=()=>{$$('.tab').forEach(x=>x.classList.toggle('on',x===b));$$('.pane').forEach(p=>p.classList.toggle('on',p.id===b.dataset.pane))});
+          /* prompt helpers */
+          const lines=()=>$('#ptext').value.split('\\n').map(l=>l.trim()).filter(Boolean).length;
+          $('#ptext').addEventListener('input',()=>{$('#lineCount').textContent=lines()+' line'+(lines()===1?'':'s')});
+          $('#ptext').addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key==='Enter'){e.preventDefault();$('#addBtn').click()}});
+          $$('.chip[data-ins]').forEach(c=>c.onclick=()=>{const t=$('#ptext');t.value=(t.value.trim()?t.value.replace(/\\s*$/,'\\n'):'')+c.dataset.ins;t.dispatchEvent(new Event('input'));t.focus()});
+          $('#clearPrompts').onclick=()=>{$('#ptext').value='';$('#ptext').dispatchEvent(new Event('input'))};
+
+          function fillSettings(){const s=S.settings;
+           $('#model').innerHTML=S.models.map(m=>\`<option\${m===s.model?' selected':''}>\${m}</option>\`).join('');
+           $('#ratio').innerHTML=S.ratios.map(r=>\`<option\${r===s.ratio?' selected':''}>\${r}</option>\`).join('');
+           $('#target').innerHTML=S.accounts.map(a=>\`<option\${a===s.targetAccount?' selected':''}>\${a}</option>\`).join('');
+           $('#res').value=s.res;$('#concurrency').value=s.concurrency;$('#boost').value=s.boost;$('#display').value=s.display;$('#strength').value=s.strength;$('#upscale').checked=s.upscale;
+           $('#queuePath').value=s.queuePath;$('#autoDistribute').checked=s.autoDistribute;$('#runMetadata').checked=s.runMetadata;$('#autoFinish').value=s.autoFinishMinutes;$('#c_cloud').value=S.creds.cloud_name||''}
+
+          function itemCard(i){
+           const done=i.frames.filter(f=>f.status==='done').length,n=i.frames.length;
+           const shape=i.type==='SINGLE'&&i.settings.ratio!=='9:16'?(i.settings.ratio==='1:1'?' sq':(i.settings.ratio==='16:9'||i.settings.ratio==='4:3')?' land':''):'';
+           const frames=i.frames.map((f,k)=>\`<div class="fr \${f.status}\${shape}" title="\${esc(f.name)}\${f.error?' — '+esc(f.error):''}">\${f.status==='done'?\`<img src="\${f.thumb}" loading="lazy" alt="\${esc(f.file)}" onclick="lb('\${f.thumb}','\${esc(i.folder)} · \${esc(f.file)}')">\`:\`<div class="ph">\${f.status==='running'?'rendering…':f.status==='failed'?'failed':'queued'}</div>\`}\${i.status!=='running'?\`<button class="re" title="Regenerate \${esc(f.name)}" onclick="retry(\${i.id},\${k})">\${RE}</button>\`:''}<div class="cap">\${esc(f.name)}</div></div>\`).join('');
+           const dist=i.distributed.length?\`<span class="st dist">↗ \${i.distributed.map(x=>esc(x.dbName.replace('zedge_','z'))).join(' · ')}</span>\`:'';
+           const busyDist=i.distributeStatus==='running'?'<span class="st running">distributing…</span>':'';
+           return \`<article class="item \${i.status}" data-id="\${i.id}">
+            <div class="ih"><div class="idx">\${String(i.index).padStart(2,'0')}</div><div class="ttl"><b title="\${esc(i.folder)}">\${esc(i.concept)}</b><small><span class="type \${typeCls(i.type)}">\${i.type}</span><span>\${esc(i.settings.model)}</span><span>· \${i.settings.res}\${i.type==='SINGLE'?' · '+i.settings.ratio:''}</span></small></div>
+             <svg class="ring2" viewBox="0 0 36 36" title="\${done}/\${n}"><circle class="bg" cx="18" cy="18" r="15"/><circle class="fg" cx="18" cy="18" r="15" stroke-dasharray="94.2" stroke-dashoffset="\${(94.2*(1-done/n)).toFixed(1)}" style="\${i.status==='failed'||i.status==='partial'?'stroke:var(--err)':i.status==='running'?'stroke:var(--warn)':''}"/></svg></div>
+            \${n<4?\`<div class="strip" data-n="\${n}">\${frames}<div class="beside"><div class="prompt \${openPrompts.has(i.id)?'open':''}" onclick="togglePrompt(\${i.id})">\${esc(i.prompt)}</div><div class="meta2"><span>\${n===1?'1 frame':n+' frames'}</span><span>· \${fmtB(i.frames.reduce((a,f)=>a+(f.size||0),0))}</span></div></div></div>\`
+            :\`<div class="strip" data-n="\${n}">\${frames}</div><div class="prompt \${openPrompts.has(i.id)?'open':''}" onclick="togglePrompt(\${i.id})">\${esc(i.prompt)}</div>\`}
+            \${i.error?\`<div class="err">\${esc(i.error)}</div>\`:''}\${i.distributeError?\`<div class="err">Distribute · \${esc(i.distributeError)}</div>\`:''}
+            <div class="if"><div class="meta"><span class="st \${i.status}">\${i.status} · \${done}/\${n}</span>\${dist}\${busyDist}</div>
+             \${i.status==='done'?\`<button class="btn sec sm" onclick="dist(\${i.id})">Distribute</button>\`:''}
+             \${(i.status==='failed'||i.status==='partial')?\`<button class="btn warn sm" onclick="retry(\${i.id})">\${RE}Retry failed</button>\`:''}
+             \${i.status!=='running'?\`<button class="btn sec sm icon" title="Remove" onclick="del(\${i.id})"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button>\`:''}
+            </div></article>\`}
+
+          function render(){const s=S,t=s.totals;
+           $('#tFrames').textContent=\`\${t.framesDone} / \${t.frames}\`;ring($('#rFrames'),t.frames?t.framesDone/t.frames:0);
+           $('#tItems').textContent=t.items;$('#tItemsDone').textContent=\`\${t.itemsDone} done\`;$('#tDist').textContent=t.distributed;
+           const total=s.deadline-s.startedAt,left=Math.max(0,s.deadline-s.now);$('#tLeft').textContent=fmtLeft(left);ring($('#rTime'),left/total);
+           $('#bar').style.width=(t.frames?t.framesDone/t.frames*100:0)+'%';
+           $('#credPill').classList.toggle('off',!s.creds.ok);$('#credTxt').textContent=s.creds.ok?s.creds.cloud_name:'no credentials';
+           $('#credHint').textContent=s.creds.ok?\`Connected to cloud "\${s.creds.cloud_name}" (key \${s.creds.api_key}). Fill all three fields to replace.\`:'Add cloud name, API key and API secret from your Cloudinary console.';
+           $('#credBanner').classList.toggle('on',!s.creds.ok&&s.items.some(i=>i.status==='queued'));
+           $('#pauseBtn').querySelector('span').textContent=s.paused?'Resume':'Pause';$('#pauseBtn').classList.toggle('warn',s.paused);
+           const running=s.items.filter(i=>i.status==='running').length,queued=s.items.filter(i=>i.status==='queued').length,failed=s.items.filter(i=>i.status==='failed'||i.status==='partial').length;
+           const st=$('#status');st.className='status '+(s.finished?'done':running?'run':s.paused&&queued?'paused':t.items&&!queued?'done':'');
+           st.querySelector('span').textContent=s.finished?'finished':running?\`\${running} rendering · \${queued} queued\`:queued?(s.paused?\`paused · \${queued} queued\`:\`\${queued} queued\`):(t.items?'all done':'idle');
+           $('#fAll').textContent=t.items;$('#fRun').textContent=running+queued;$('#fDone').textContent=t.itemsDone;$('#fFail').textContent=failed;$('#fDist').textContent=t.distributed;
+           const fb=$('#finishedBox');fb.classList.toggle('on',s.finished);if(s.finished)fb.innerHTML=\`<b>Session finished — \${esc(s.finishReason)}</b>The workflow is moving on\${s.settings.runMetadata?' to the Gemini‑Web metadata job':''}. Everything generated is saved as the <code>image-studio-output</code> artifact.\`;
+           const list=s.items.filter(i=>filter==='all'||(filter==='running'&&(i.status==='running'||i.status==='queued'))||(filter==='done'&&i.status==='done')||(filter==='failed'&&(i.status==='failed'||i.status==='partial'))||(filter==='dist'&&i.distributed.length));
+           $('#empty').style.display=s.items.length?'none':'';$('#items').style.display=list.length?'':'none';
+           if(s.items.length&&!list.length){$('#empty').style.display='';$('#empty').querySelector('h4').textContent='Nothing matches this filter';$('#empty').querySelector('p').textContent='Try another filter above.'}
+           else if(!s.items.length){$('#empty').querySelector('h4').textContent='Nothing in the collection yet';$('#empty').querySelector('p').textContent='Paste prompts on the left — singles, 24‑hour, dual or battery sets — and watch them render here frame by frame.'}
+           $('#items').innerHTML=list.map(itemCard).join('');
+           const lg=$('#log');const atBottom=lg.scrollHeight-lg.scrollTop-lg.clientHeight<40;
+           lg.innerHTML=s.log.slice(-200).map(l=>{const m=l.match(/^(\\[[^\\]]+\\])\\s?(.*)$/);const body=m?m[2]:l;const cls=/✅|🔥|🏁/.test(body)?'ok':/❌|✖/.test(body)?'er':/⚠️|⟳|⏸/.test(body)?'wn':/🎨|📥|☁️|🚀|🔑|▶️/.test(body)?'in':'';return \`<span class="ts">\${esc(m?m[1]:'')}</span> <span class="\${cls}">\${esc(body)}</span>\`}).join('\\n');
+           if(atBottom)lg.scrollTop=lg.scrollHeight;$('#lastLog').textContent=s.log.length?s.log[s.log.length-1].replace(/^\\[[^\\]]+\\]\\s?/,''):'waiting for the runner…'}
+
+          async function poll(){try{const r=await fetch('/api/state',{cache:'no-store'});if(r.status===401){location.reload();return}S=await r.json();if(!inited){fillSettings();inited=true}render()}catch(e){$('#status').className='status';$('#status').querySelector('span').textContent='reconnecting…'}}
+          window.togglePrompt=id=>{openPrompts.has(id)?openPrompts.delete(id):openPrompts.add(id);render()};
+          window.lb=(src,cap)=>{$('#lbImg').src=src;$('#lbCap').textContent=cap;$('#lb').classList.add('on')};$('#lb').onclick=()=>$('#lb').classList.remove('on');document.addEventListener('keydown',e=>{if(e.key==='Escape')$('#lb').classList.remove('on')});
+          window.retry=async(id,frame)=>{try{await api('/api/retry',{id,frame});toast(frame===undefined?'Re-queued failed frames':'Frame re-queued')}catch(e){toast(e.message,'bad')}poll()};
+          window.del=async id=>{if(!confirm('Remove this item and its files?'))return;try{await api('/api/delete',{id})}catch(e){toast(e.message,'bad')}poll()};
+          window.dist=async id=>{try{const r=await api('/api/distribute',{ids:[id],target:$('#target').value});toast(\`Distributing \${r.count} item → \${$('#target').value}\`,'good')}catch(e){toast(e.message,'bad')}poll()};
+          $('#distAllBtn').onclick=async()=>{try{const r=await api('/api/distribute',{ids:'all',target:$('#target').value});toast(\`Distributing \${r.count} item(s) → \${$('#target').value}\`,'good')}catch(e){toast(e.message,'bad')}poll()};
+          $('#pauseBtn').onclick=async()=>{await api('/api/pause',{paused:!S.paused});poll()};
+          $$('#filters button').forEach(b=>b.onclick=()=>{filter=b.dataset.f;$$('#filters button').forEach(x=>x.classList.toggle('on',x===b));render()});
+          $('#consoleBar').onclick=()=>{const c=$('#console');c.classList.toggle('open');$('#consoleHint').textContent=c.classList.contains('open')?'▼ close':'▲ open';if(c.classList.contains('open')){const lg=$('#log');lg.scrollTop=lg.scrollHeight}};
+          $('#finishBtn').onclick=async()=>{const nd=S.items.filter(i=>i.status==='done'&&!i.distributed.length).length,busy=S.items.filter(i=>i.status==='running'||i.status==='queued').length;
+           if(!confirm(\`Finish the session?\${busy?\`\\n• \${busy} item(s) still queued/rendering will be abandoned.\`:''}\${nd?\`\\n• \${nd} completed item(s) are NOT distributed (they stay in the ZIP artifact).\`:''}\${S.settings.runMetadata?'\\n• The Gemini‑Web metadata job runs next.':''}\`))return;await api('/api/finish');toast('Finishing session…');poll()};
+          $$('[data-save]').forEach(b=>b.onclick=async()=>{const pane=b.closest('.pane'),msgEl=pane.querySelector('[id^=saveMsg]');try{
+           const settings={model:$('#model').value,res:$('#res').value,ratio:$('#ratio').value,boost:$('#boost').value,display:$('#display').value,strength:$('#strength').value,upscale:$('#upscale').checked,concurrency:$('#concurrency').value,targetAccount:$('#target').value,queuePath:$('#queuePath').value,autoDistribute:$('#autoDistribute').checked,runMetadata:$('#runMetadata').checked,autoFinishMinutes:$('#autoFinish').value};
+           const credentials={cloud_name:$('#c_cloud').value.trim(),api_key:$('#c_key').value.trim(),api_secret:$('#c_secret').value.trim()};
+           const r=await api('/api/settings',{settings,credentials});msgEl.textContent='Saved ✓'+(r.creds.ok?'':' · keys still missing');$('#c_key').value='';$('#c_secret').value='';toast('Settings saved','good')}catch(e){msgEl.textContent=e.message;toast(e.message,'bad')}poll()});
+          $('#addBtn').onclick=async()=>{const m=$('#addMsg');try{$('#addBtn').disabled=true;const r=await api('/api/prompts',{text:$('#ptext').value,type:document.querySelector('input[name=ptype]:checked').value,copies:$('#copies').value});
+           setMsg(m,\`Queued \${r.added} item(s) · \${r.frames} frame(s)\${r.problems.length?' · skipped: '+r.problems.join('; '):''}\${r.credsOk?'':' — add Cloudinary keys to start'}\`,r.credsOk?'ok':'bad');$('#ptext').value='';$('#ptext').dispatchEvent(new Event('input'));toast(\`Queued \${r.added} item(s)\`,'good');if(!r.credsOk){$$('.tab')[3].click()}}catch(e){setMsg(m,e.message,'bad');toast(e.message,'bad')}finally{$('#addBtn').disabled=false}poll()};
+          poll();setInterval(poll,2500);
+          </script></body></html>
+          `;
+
+          server.listen(PORT, () => {
+            log(`🖥️  Image Studio listening on http://localhost:${PORT}/?k=${TOKEN}`);
+            log(`⏱️  Session deadline: ${new Date(deadline).toISOString()} (${TIMEOUT_MIN} min)`);
+            log(hasCreds() ? `🔑 Cloudinary cloud: ${creds.cloud_name}` : '⚠️  No Cloudinary credentials yet — add them in the panel (or CLOUDINARY_* secrets).');
+            saveState();
+          });
+          process.on('SIGTERM', () => finish('runner stopped'));
+          process.on('SIGINT', () => finish('interrupted'));
+
+          STUDIO_EOF
+          node --check studio_server.mjs && echo "✅ studio_server.mjs OK ($(wc -l < studio_server.mjs) lines)"
+
+      - name: 🚀 Start Image Studio + Cloudflare tunnel
+        id: tunnel
+        env:
+          CLOUDINARY_CLOUD_NAME: ${{ secrets.CLOUDINARY_CLOUD_NAME }}
+          CLOUDINARY_API_KEY: ${{ secrets.CLOUDINARY_API_KEY }}
+          CLOUDINARY_API_SECRET: ${{ secrets.CLOUDINARY_API_SECRET }}
+          CLOUDINARY_URL: ${{ secrets.CLOUDINARY_URL }}
+          TARGET_ACCOUNT: ${{ github.event.inputs.target_account }}
+          IMAGE_QUEUE_PATH: ${{ github.event.inputs.image_queue_path }}
+          STUDIO_TIMEOUT_MINUTES: ${{ github.event.inputs.studio_timeout_minutes }}
+          STUDIO_AUTO_METADATA: ${{ github.event.inputs.studio_auto_metadata }}
+          STUDIO_OUT_DIR: /tmp/studio_out
+          STUDIO_RESULT_FILE: /tmp/studio_result.json
+        run: |
+          # Random access token — the tunnel URL is public, the panel only opens with ?k=TOKEN
+          STUDIO_TOKEN="$(openssl rand -hex 12)"
+          export STUDIO_TOKEN
+          mkdir -p /tmp/studio_out
+
+          nohup node studio_server.mjs > /tmp/studio_server.log 2>&1 &
+          echo $! > /tmp/studio_server.pid
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:8787/healthz > /dev/null && break
+            sleep 1
+          done
+          curl -sf http://localhost:8787/healthz > /dev/null || { echo "❌ Studio server did not start"; cat /tmp/studio_server.log; exit 1; }
+          echo "✅ Studio server up (pid $(cat /tmp/studio_server.pid))"
+
+          nohup cloudflared tunnel --url http://localhost:8787 --no-autoupdate > /tmp/cloudflared.log 2>&1 &
+          echo $! > /tmp/cloudflared.pid
+          TUNNEL_URL=""
+          for i in $(seq 1 90); do
+            TUNNEL_URL="$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' /tmp/cloudflared.log | head -n 1 || true)"
+            [ -n "$TUNNEL_URL" ] && break
+            sleep 1
+          done
+          if [ -z "$TUNNEL_URL" ]; then
+            echo "❌ Could not obtain a trycloudflare.com URL"; cat /tmp/cloudflared.log; exit 1
+          fi
+          PANEL_URL="${TUNNEL_URL}/?k=${STUDIO_TOKEN}"
+          echo "$PANEL_URL" > /tmp/studio_url.txt
+          echo "panel_url=$PANEL_URL" >> "$GITHUB_OUTPUT"
+
+          echo ""
+          echo "══════════════════════════════════════════════════════════════════════"
+          echo "  🎨  IMAGE STUDIO PANEL IS LIVE"
+          echo ""
+          echo "  👉  $PANEL_URL"
+          echo ""
+          echo "  ⏱️  Session length: ${STUDIO_TIMEOUT_MINUTES:-240} min (press 'Finish session' in the panel when done)"
+          echo "══════════════════════════════════════════════════════════════════════"
+          echo ""
+          {
+            echo "## 🎨 Image Studio panel"
+            echo ""
+            echo "### 👉 [Open the panel]($PANEL_URL)"
+            echo ""
+            echo '```'
+            echo "$PANEL_URL"
+            echo '```'
+            echo ""
+            echo "- Session length: **${STUDIO_TIMEOUT_MINUTES:-240} min** · target account default: **${TARGET_ACCOUNT}** · queue: **${IMAGE_QUEUE_PATH}**"
+            echo "- Paste prompts (one per line, \`TYPE | concept | prompt\`, or JSON), choose model / ratio / settings, then **Add to queue**."
+            echo "- Generation runs on this runner even if your connection drops — reopen the link to continue."
+            echo "- **Distribute** sends items to R2 + Firebase (\`wallpaperQueue\`); **Finish session** ends the panel and triggers the Gemini-Web metadata job."
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 🖥️ Panel session (live log — ends when you press Finish, on idle auto-finish, or at timeout)
+        run: |
+          PID="$(cat /tmp/studio_server.pid)"
+          echo "🔗 Panel: $(cat /tmp/studio_url.txt)"
+          echo "⏳ Waiting for the session to finish (server pid $PID)..."
+          # Stream the studio log live into the Actions log while the server is alive
+          tail -n +1 -f /tmp/studio_server.log --pid="$PID" || true
+          # Small grace period for the result file to be flushed
+          sleep 3
+          kill "$(cat /tmp/cloudflared.pid)" 2>/dev/null || true
+          if [ ! -f /tmp/studio_result.json ]; then
+            echo "⚠️ No result file — the server stopped unexpectedly"
+            echo '{"reason":"server stopped unexpectedly","items":0,"generated":0,"frames":0,"distributed":0,"records":0,"runMetadata":false}' > /tmp/studio_result.json
+          fi
+          cat /tmp/studio_result.json
+
+      - name: 📤 Publish session result
+        id: result
+        if: always()
+        run: |
+          R=/tmp/studio_result.json
+          [ -f "$R" ] || echo '{"reason":"no session","items":0,"generated":0,"frames":0,"distributed":0,"records":0,"runMetadata":false}' > "$R"
+          echo "run_metadata=$(jq -r '.runMetadata // false' $R)" >> "$GITHUB_OUTPUT"
+          echo "records=$(jq -r '.records // 0' $R)" >> "$GITHUB_OUTPUT"
+          echo "generated=$(jq -r '.generated // 0' $R)" >> "$GITHUB_OUTPUT"
+          {
+            echo "## 🎨 Image Studio results"
+            echo ""
+            echo "| Metric | Value |"
+            echo "|--------|-------|"
+            echo "| Ended because | $(jq -r '.reason' $R) |"
+            echo "| Items (sets + singles) | $(jq -r '.items' $R) |"
+            echo "| Fully generated items | $(jq -r '.generated' $R) |"
+            echo "| Frames generated | $(jq -r '.frames' $R) |"
+            echo "| Items distributed | $(jq -r '.distributed' $R) |"
+            echo "| Firebase records written | $(jq -r '.records' $R) |"
+            echo "| Gemini-Web metadata job next | $(jq -r '.runMetadata' $R) |"
+            echo ""
+            echo "> All generated JPGs + prompts + metadata.json are attached as the **image-studio-output** artifact (also downloadable as ZIP from the panel)."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 🗂️ Upload generated images (artifact)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-studio-output
+          path: /tmp/studio_out/
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: 🧾 Upload studio + tunnel logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-studio-logs
+          path: |
+            /tmp/studio_server.log
+            /tmp/cloudflared.log
+          if-no-files-found: ignore
+          retention-days: 3
+
   generate-image-metadata:
-    if: github.event.inputs.mode == 'metadata'
+    # Runs for mode=metadata, and automatically after an Image Studio session that
+    # distributed items (needs.image-studio is skipped for the other modes).
+    needs: [image-studio]
+    if: ${{ !cancelled() && (github.event.inputs.mode == 'metadata' || (github.event.inputs.mode == 'image_studio' && needs.image-studio.result == 'success' && needs.image-studio.outputs.run_metadata == 'true')) }}
     name: 🖼️ Generate Image Metadata → Firebase
     runs-on: ubuntu-latest
 
@@ -1724,7 +3114,7 @@ jobs:
               // imageUrl  = legacy remote URL
               // fileBase64 = inline base64 (older records)
               const setSlotUrl = SET_KINDS[kind] ? firstSlotUrl(record, kind) : '';
-              const hasSource = !!(record.fileUrl || record.imageUrl || record.fileBase64 || setSlotUrl);
+              const hasSource = !!(record.fileUrl || record.imageUrl || record.fileBase64 || setSlotUrl || (VIDEO_KINDS[kind] && record.thumbUrl)); // v27.10 video thumb
               if (!hasSource) {
                 skippedNoData++;
                 console.warn(`  ⚠️  [${key}] Skipped — no fileUrl / imageUrl / fileBase64 / set slot file found.`);
@@ -1745,6 +3135,51 @@ jobs:
             return candidates;
           }
 
+          // ─── ZEDGE CONTENT POLICY GUARD (v21) ─────────────────────────────────────
+          // Enforces Zedge's Content Guidelines on everything this workflow produces:
+          // original-only (no artists, songs, characters, brands, logos, celebrities), no
+          // adult / hate / violence / drugs / illegal content, accurate non-promotional
+          // metadata, 2–10 real tags. Violations are regenerated or skipped — never uploaded.
+          const ZEDGE_POLICY_RULES = `ZEDGE MARKETPLACE POLICY (MANDATORY — a single violation permanently suspends the seller account):
+          - 100% ORIGINAL work only. Never name, reference, imitate or hint at any real artist, band, singer, song, lyric, album, film, TV show, game, anime, cartoon, comic, character, franchise, brand, company, product, logo, trademark, sports team, celebrity or public figure. No "in the style of", no "sounds like", no theme/cover/remix of anything existing.
+          - No sexual, suggestive, nude or adult content. No hate speech, slurs, hate symbols, discrimination or stereotypes. No violence, gore, weapons, drugs, self-harm or illegal activity. Nothing involving minors.
+          - Metadata must be truthful and describe ONLY this item. No promotional or spam words (free, download, app, website, subscribe, follow, link, buy), no URLs, hashtags, @handles, emojis, brand or service names, no misleading keywords.
+          - Keywords: between 2 and 10 genuine descriptive single words.`;
+          const POLICY_PROMO = /\b(free|download|downloads|website|subscribe|follow|buy|sale|discount|promo|www|http|https|telegram|whatsapp|instagram|tiktok|youtube|facebook|twitter|zedge)\b/i;
+          const POLICY_ADULT = /\b(sexy|sex|sexual|nude|nudity|naked|porn|porno|xxx|erotic|erotica|boobs|breasts?|booty|bikini|lingerie|topless|hot girls?|seductive|nsfw|hentai|fetish|stripper|thong|underwear|cleavage)\b/i;
+          const POLICY_HARM = /\b(nigg\w*|fagg?\w*|retard\w*|murder|gore|gun|guns|rifle|pistol|shooting|shooter|terror\w*|nazi|hitler|swastika|isis|jihad|marijuana|cocaine|heroin|meth|drugs|suicide|self-harm|rape|racist|slur)\b/i;
+          const POLICY_IP = /\b(disney|pixar|marvel|dc comics|batman|superman|spider-?man|iron ?man|avengers|wolverine|x-?men|deadpool|harley quinn|star ?wars|darth|vader|yoda|jedi|mandalorian|grogu|harry ?potter|hogwarts|lord of the rings|hobbit|game of thrones|stranger things|squid game|breaking bad|pokemon|pikachu|charizard|super mario|luigi|zelda|minecraft|fortnite|roblox|among us|gta|call of duty|pubg|free fire|valorant|league of legends|overwatch|god of war|kratos|elden ring|naruto|goku|dragon ?ball|one piece|luffy|attack on titan|demon slayer|jujutsu|gojo|itachi|sasuke|death note|my hero academia|hello kitty|sanrio|mickey|minnie|donald duck|elsa|moana|encanto|toy story|shrek|minions|despicable|kung fu panda|spongebob|simpsons|rick and morty|peppa|paw patrol|barbie|hot wheels|lego|nike|adidas|puma|gucci|louis vuitton|iphone|samsung|xiaomi|oneplus|huawei|tesla|bmw|mercedes|audi|ferrari|lamborghini|porsche|toyota|coca-?cola|pepsi|starbucks|mcdonald'?s|kfc|netflix|spotify|nfl|nba|fifa|uefa|real madrid|barcelona|manchester united|liverpool fc|juventus|psg|messi|ronaldo|neymar|mbappe|lebron|taylor swift|beyonce|drake|eminem|rihanna|bts|blackpink|billie eilish|ed sheeran|weeknd|bad bunny|justin bieber|ariana grande|dua lipa|coldplay|imagine dragons|linkin park|metallica|beatles|nirvana|michael jackson|elvis|kanye|travis scott|post malone|shakira|adele|bruno mars|hans zimmer|john williams|bollywood|shah rukh|salman khan|allu arjun|pushpa|kgf|pathaan|jawan|kabir singh|arijit|pritam|ar rahman|a\.r\. rahman|anirudh|nokia|nokia tune|marimba|over the horizon|xbox|playstation|nintendo|godzilla|king kong|jurassic|transformers|optimus prime|bumblebee|pirates of the caribbean|jack sparrow|james bond|mission impossible|john wick|fast and furious|terminator|poppy playtime|huggy wuggy|skibidi|fnaf|cuphead|genshin|honkai|clash of clans|clash royale|brawl stars|candy crush|angry birds|subway surfers|temple run|flappy bird|tom and jerry|doraemon|shinchan|ben 10|scooby|looney|bugs bunny|winnie the pooh|cars movie|lightning mcqueen|olaf|stitch|lilo|baymax|zootopia|inside out|wednesday addams|squid|haikyuu|chainsaw man|spy x family|frieren|solo leveling|sung jinwoo)\b/i;
+          function zedgePolicyIssues(meta) {
+            const issues = [];
+            const fields = { title: meta.title || '', tags: meta.tags || '', description: meta.description || '', prompt: meta.enhancedPrompt || '' };
+            for (const [f, v] of Object.entries(fields)) {
+              if (!v) continue;
+              const ip = v.match(POLICY_IP); if (ip) issues.push(`${f}: protected name "${ip[0]}"`);
+              const ad = v.match(POLICY_ADULT); if (ad) issues.push(`${f}: adult term "${ad[0]}"`);
+              const hv = v.match(POLICY_HARM); if (hv) issues.push(`${f}: prohibited term "${hv[0]}"`);
+              if (f !== 'prompt') {
+                const pr = v.match(POLICY_PROMO); if (pr) issues.push(`${f}: promotional/spam word "${pr[0]}"`);
+                if (/[#@]|https?:|www\.|\.(com|net|org|io|app)\b/i.test(v)) issues.push(`${f}: link/hashtag/handle`);
+              }
+            }
+            return issues;
+          }
+          function zedgeCleanTags(tags) {
+            const words = String(tags || '').split(/[,\s]+/).map(w => w.trim().toLowerCase()).filter(w => /^[a-z0-9-]{2,20}$/.test(w));
+            const out = [];
+            for (const w of words) if (!out.includes(w) && !POLICY_IP.test(w) && !POLICY_ADULT.test(w) && !POLICY_HARM.test(w) && !POLICY_PROMO.test(w)) out.push(w);
+            return out.slice(0, 10);
+          }
+          // Returns { issues, meta } — meta has policy-clean, deduped, 2–10 tags.
+          function zedgeEnforce(meta, kind) {
+            const issues = zedgePolicyIssues(meta);
+            const tags = zedgeCleanTags(meta.tags);
+            const fallback = kind === 'image' ? ['wallpaper', 'background', 'art', 'design', 'phone', 'screen'] : ['melody', 'tune', 'alert', 'phone', 'music', 'sound'];
+            const cat = String(meta.category || '').toLowerCase().replace(/[^a-z]/g, '');
+            if (cat && cat !== 'other' && !tags.includes(cat)) tags.unshift(cat);
+            for (const w of fallback) { if (tags.length >= 2) break; if (!tags.includes(w)) tags.push(w); }
+            return { issues, meta: { ...meta, tags: tags.slice(0, 10).join(', ') } };
+          }
           // ─── FIREBASE: PATCH METADATA ─────────────────────────────────────────────
           async function firebasePatchMetadata(dbUrl, queuePath, key, metadata) {
             const res = await fetch(`${dbUrl}/${queuePath}/${key}.json`, {
@@ -1790,6 +3225,23 @@ jobs:
               // fileUrl  = R2 URL saved by distribute-image.html
               // imageUrl = legacy field name (kept for backwards compatibility)
               // Wallpaper sets: fall back to the first slot file when fileUrl is absent
+              // v27.10 video thumb: Live Wallpaper / Charging Animation records already carry a JPEG
+              // thumbnail (thumbUrl, written by the panel + app). Use it directly - no multi-MB video
+              // download, no ffmpeg dependency. Falls back to frame extraction only when thumbUrl is missing.
+              if (VIDEO_KINDS[kind] && record.thumbUrl) {
+                console.log(`  🎬 Video item - using thumbnail: ${record.thumbUrl}`);
+                const tRes = await fetch(record.thumbUrl);
+                if (tRes.ok) {
+                  const tBuf = Buffer.from(await tRes.arrayBuffer());
+                  if (tBuf.length > 1024) {
+                    const tPath = path.join(tmpDir, `${key}.jpg`);
+                    fs.writeFileSync(tPath, tBuf);
+                    console.log(`  💾 Saved video thumbnail → ${tPath} (${(tBuf.length / 1024).toFixed(1)} KB)`);
+                    return tPath;
+                  }
+                }
+                console.warn(`  ⚠️  Thumbnail fetch failed (HTTP ${tRes.status}) - falling back to video frame extraction`);
+              }
               const remoteUrl = record.fileUrl || record.imageUrl || (SET_KINDS[kind] ? firstSlotUrl(record, kind) : '');
               if (!remoteUrl) throw new Error('No fileBase64, fileUrl, imageUrl, or set slot file found on record.');
               const urlSource = record.fileUrl ? 'fileUrl (R2)' : record.imageUrl ? 'imageUrl' : 'set slot file (R2)';
@@ -1830,7 +3282,7 @@ jobs:
           }
 
           // ─── GEMINI WEB: SEND TEXT PROMPT AND WAIT FOR RESPONSE ──────────────────
-          async function callGeminiWeb(promptText, geminiPage) {
+          async function callGeminiWeb(promptText, geminiPage, opts = {}) {
             console.log(`    🌐 Sending prompt (${promptText.length} chars)...`);
 
             const inputSel = 'div.ql-editor[contenteditable="true"]';
@@ -1866,6 +3318,12 @@ jobs:
             console.log(`    ⌨️  Submitted via Enter key`);
 
             const deadline = Date.now() + 90000;
+            // v27.10: a reply is only accepted once it contains the closing tag of the LAST template section
+            // (opts.completeWhen). Before, a 3 s pause while Gemini was still streaming was mistaken for a
+            // finished answer -> half a template got parsed -> the audio prompt silently fell back to
+            // "electronic synth pulse" while title/tags described another sound (ringtone != metadata).
+            const completeRe = opts.completeWhen || null;
+            const softDeadline = Date.now() + 75000;   // after this a stable partial reply is accepted (the parser validates it)
             let responseText = '';
             let lastSeen = '';
             let stableCount = 0;
@@ -1897,7 +3355,7 @@ jobs:
 
               if (latestText === lastSeen) {
                 stableCount++;
-                if (stableCount >= 2) { responseText = latestText; break; }
+                if (stableCount >= 2 && (!completeRe || completeRe.test(latestText) || Date.now() > softDeadline)) { responseText = latestText; break; }
               } else {
                 lastSeen = latestText;
                 stableCount = 0;
@@ -2190,26 +3648,38 @@ jobs:
             const validCategories = VALID_IMG_CATS.filter(c => c !== 'OTHER').join(', ');
             const kindContext = KIND_PROMPT_CONTEXT[kind] || KIND_PROMPT_CONTEXT.WALLPAPER;
             const METADATA_PROMPT =
-              `You are an expert image curator and SEO metadata specialist.\n\n` +
+              `You are an expert image curator, SEO metadata specialist and Zedge marketplace compliance reviewer.\n\n${ZEDGE_POLICY_RULES}\n\n` +
               `${kindContext}\n` +
               `Look at the attached image carefully and generate the following metadata:\n` +
               `1. A creative and UNIQUE TITLE (max 25 characters). Use evocative, descriptive words. Avoid generic filler words like "beautiful", "amazing", "stunning". No quotes.\n` +
               `2. 15 relevant, descriptive single-word KEYWORDS (comma-separated). Cover the subject, colors, mood, style, and use-case.\n` +
               `3. The most appropriate CATEGORY selected ONLY from this list: ${validCategories}.\n` +
-              `4. A SHORT description in MAXIMUM 5 WORDS. No punctuation, no full sentences.\n\n` +
+              `4. A SHORT description in MAXIMUM 5 WORDS. No punctuation, no full sentences.\n` +
+              `5. POLICY verdict: write OK if this image is clearly safe and original under the policy above. Otherwise write FLAG: <short reason> — flag any recognizable copyrighted character, franchise art, brand/logo/trademark, celebrity or real identifiable person (selfie, family photo), text watermark, sexual/suggestive content, hate symbol, violence, weapons, drugs, apparent minors, or a stretched / blurry / badly cropped low-quality image.\n\n` +
               `CRITICAL: Format your ENTIRE response EXACTLY like this — no other text outside these tags:\n` +
               `[TITLE]...[/TITLE]\n` +
               `[KEYWORDS]...[/KEYWORDS]\n` +
               `[CATEGORY]...[/CATEGORY]\n` +
-              `[DESCRIPTION]...[/DESCRIPTION]`;
+              `[DESCRIPTION]...[/DESCRIPTION]\n` +
+              `[POLICY]OK or FLAG: reason[/POLICY]`;
 
-            const responseText = await callGeminiWeb(METADATA_PROMPT, geminiPage);
+            const responseText = await callGeminiWeb(METADATA_PROMPT, geminiPage, { completeWhen: /\[\s*\/\s*POLICY\s*\]/i });
 
             // Parse response tags
             const getTagValue = (text, tag) => {
-              const regex = new RegExp(`\\[${tag}\\]([\\s\\S]*?)\\[\\/${tag}\\]`, 'i');
-              const match = text.match(regex);
-              return match ? match[1].trim() : '';
+              // v27.10 tolerant parser: Gemini renders markdown, so "[ENHANCED_PROMPT]" can come back as
+              // "**[ENHANCED PROMPT]**", "[ENHANCEDPROMPT]", with a ":" after it, or without its closing tag.
+              // The old strict regex then returned '' and the caller silently used a fallback value.
+              const t = tag.replace(/_/g, '[_ \\-]?');
+              const open = new RegExp(`\\[\\s*${t}\\s*\\]\\s*:?`, 'i');
+              const m = text.match(open);
+              if (!m) return '';
+              let rest = text.slice(m.index + m[0].length);
+              const close = rest.match(new RegExp(`\\[\\s*\\/\\s*${t}\\s*\\]`, 'i'));
+              if (close) rest = rest.slice(0, close.index);
+              else { const nx = rest.match(/\[\s*\/?\s*(ENHANCED[_ -]?PROMPT|TITLE|KEYWORDS|CATEGORY|DESCRIPTION|POLICY)\s*\]/i); if (nx) rest = rest.slice(0, nx.index); }
+              rest = rest.replace(/\*\*/g, '').replace(/^`+|`+$/g, '').replace(/^\s*:\s*/, '').trim();
+              return /^(\.{3}|\u2026)$/.test(rest) ? '' : rest;   // the literal "..." template placeholder counts as missing
             };
 
             const title       = cleanTitle(getTagValue(responseText, 'TITLE'))       || `Image ${key.slice(0, 8)}`;
@@ -2222,7 +3692,9 @@ jobs:
             console.log(`  📁 Category : ${category}`);
             console.log(`  📝 Desc     : ${description}`);
 
-            return { title, tags, category, description };
+            const policy = getTagValue(responseText, 'POLICY');
+            console.log(`  🛡️  Policy   : ${policy || '(no verdict)'}`);
+            return { title, tags, category, description, policy };
           }
 
           // ─── MAIN ─────────────────────────────────────────────────────────────────
@@ -2322,6 +3794,7 @@ jobs:
 
           // ─── PROCESS EACH DB TARGET ───────────────────────────────────────────────
           let totalSuccess = 0;
+          let totalHeld = 0;
           let totalFailed  = 0;
 
           for (const db of TARGET_DB_URLS) {
@@ -2353,18 +3826,45 @@ jobs:
               let tmpImagePath = null;
               try {
                 tmpImagePath = await imageToTempFile(record, key, kind);
-                const metadata = await generateImageMetadata(tmpImagePath, key, geminiPage, kind);
-
-                await firebasePatchMetadata(db.url, IMAGE_QUEUE_PATH, key, {
-                  title: metadata.title,
-                  tags: metadata.tags,
-                  category: metadata.category,
-                  description: metadata.description,
-                  metadataGeneratedAt: Date.now()
-                });
-
-                console.log(`  ✅ [${db.name}] [${key}] Metadata patched successfully!`);
-                totalSuccess++;
+                let metadata = await generateImageMetadata(tmpImagePath, key, geminiPage, kind);
+                let check = zedgeEnforce(metadata, 'image');
+                if (check.issues.length) {
+                  console.warn(`  🚫 [${db.name}] [${key}] Zedge policy: ${check.issues.join('; ')} — regenerating metadata once`);
+                  await sleep(2000);
+                  metadata = await generateImageMetadata(tmpImagePath, key, geminiPage, kind);
+                  check = zedgeEnforce(metadata, 'image');
+                }
+                const verdict = String(metadata.policy || '').trim();
+                const flag = /^FLAG/i.test(verdict) ? verdict.replace(/^FLAG\s*:?\s*/i, '').trim() || 'flagged by policy review' : '';
+                const patch = {
+                  title: check.meta.title,
+                  tags: check.meta.tags,
+                  category: check.meta.category,
+                  description: check.meta.description,
+                  metadataGeneratedAt: Date.now(),
+                  policyCheckedAt: Date.now()
+                };
+                const reason = flag || (check.issues.length ? `metadata could not be made policy-safe: ${check.issues.join('; ')}` : '');
+                if (reason && (record.status || 'queued') === 'queued') {
+                  // Hold the item: bots only upload status=queued. It appears in the panel/app
+                  // Failed section with the reason; Requeue only if it is your own compliant work.
+                  Object.assign(patch, {
+                    status: 'failed',
+                    policyCheck: 'held',
+                    policyFlag: reason,
+                    error: `Zedge policy hold — ${reason}. Review this item; Requeue only if it is your own original, policy-compliant work (uploading it may suspend the Zedge account).`,
+                    failedAt: Date.now()
+                  });
+                  await firebasePatchMetadata(db.url, IMAGE_QUEUE_PATH, key, patch);
+                  console.warn(`  🛑 [${db.name}] [${key}] HELD (not uploaded): ${reason}`);
+                  totalHeld++;
+                } else {
+                  patch.policyCheck = reason ? 'review' : 'passed';
+                  if (reason) patch.policyFlag = reason;
+                  await firebasePatchMetadata(db.url, IMAGE_QUEUE_PATH, key, patch);
+                  console.log(`  ✅ [${db.name}] [${key}] Metadata patched successfully! (policy ${patch.policyCheck})`);
+                  totalSuccess++;
+                }
 
               } catch (err) {
                 console.error(`  ❌ [${db.name}] [${key}] Failed: ${err.message}`);
@@ -2407,6 +3907,7 @@ jobs:
           console.log('============================================================');
           console.log(`✅ Success  : ${totalSuccess}`);
           console.log(`❌ Failed   : ${totalFailed}`);
+          console.log(`🛑 Held     : ${totalHeld} (Zedge policy — see Failed section, Requeue only if compliant)`);
           console.log(`⏭️  Already done: images with full metadata were skipped automatically`);
           console.log('============================================================');
 
