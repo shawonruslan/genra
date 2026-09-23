@@ -1604,6 +1604,12 @@ jobs:
   #                        status failed + policyCheck held when flagged). The Zedge bot never
   #                        sees a "metadata missing" record. A final Firebase-scan pass still
   #                        runs after the session as a safety net.
+  #    🔒 One image / set → ONE Zedge account only (no all_accounts, item lock, SHA-256 file
+  #       ledger, no frame regeneration after distribution) — duplicate content across
+  #       accounts gets Zedge accounts suspended. To feed all accounts from one batch use
+  #       target "spread": item 1 → zedge_1, item 2 → zedge_2, … (least-loaded first), so
+  #       every account gets DIFFERENT files. target_account=all_accounts falls back to
+  #       zedge_2 in the studio; ringtone/metadata modes are unchanged.
   #    If your power/internet drops, the runner keeps generating; reopen the same link.
   # ═══════════════════════════════════════════════════════════════════════════
   generate-image-metadata:
@@ -3004,10 +3010,11 @@ jobs:
             settings: {
               model: 'gpt-image-2.5-sunburst', res: '2K', ratio: '9:16', boost: 'vivid', display: 'any', strength: 'clear', upscale: true,
               concurrency: 2,
-              targetAccount: (process.env.TARGET_ACCOUNT || 'zedge_2').trim().toLowerCase(),
+              targetAccount: (FIREBASE_DB_MAP[(process.env.TARGET_ACCOUNT || '').trim().toLowerCase()] ? (process.env.TARGET_ACCOUNT || '').trim().toLowerCase() : 'zedge_2'),   // never "all_accounts" here
               queuePath: (process.env.IMAGE_QUEUE_PATH || 'wallpaperQueue').trim(),
               autoDistribute: false,
-              requireMetadata: true,                                 // never push a record without title/tags/category (the Zedge bot skips those)
+              requireMetadata: true,
+              spreadPool: Object.keys(FIREBASE_DB_MAP),                 // accounts used by target "spread" (each item → one account, round-robin balanced)                                 // never push a record without title/tags/category (the Zedge bot skips those)
               runMetadata: (process.env.STUDIO_AUTO_METADATA || 'true') !== 'false',
               autoMetadata: (process.env.STUDIO_AUTO_METADATA || 'true') !== 'false',
               autoFinishMinutes: 0
@@ -3201,9 +3208,35 @@ jobs:
           }
 
           // ─── DISTRIBUTION: Cloudinary JPG → R2 → Firebase (same schema as the panel / ringtone job) ──
+          // ⚠️ ONE ITEM → ONE ZEDGE ACCOUNT, ALWAYS. The same image/set in two Zedge accounts = duplicate content = suspension.
+          // There is deliberately NO "all accounts" target here, and the ledger below makes a second send impossible.
+          // target "spread" = DISTRIBUTE THE COLLECTION ACROSS THE ACCOUNTS: every item still goes to exactly ONE
+          // account, but consecutive items are spread round-robin over settings.spreadPool (least-loaded first),
+          // so zedge_1..4 each receive different sets / images and never the same file.
+          const SPREAD = 'spread';
+          function spreadCounts() {
+            const pool = (state.settings.spreadPool || []).filter(a => FIREBASE_DB_MAP[a]);
+            const counts = Object.fromEntries(pool.map(a => [a, 0]));
+            for (const it of state.items) { const a = it.lockedAccount || (it.distributed[0] && it.distributed[0].dbName); if (a && a in counts) counts[a]++; }
+            return { pool, counts };
+          }
+          let spreadCursor = 0;
+          function pickSpreadAccount() {
+            const { pool, counts } = spreadCounts();
+            if (!pool.length) throw new Error('Spread: no accounts selected in "Spread across" — tick at least one account.');
+            const min = Math.min(...pool.map(a => counts[a]));
+            const candidates = pool.filter(a => counts[a] === min);
+            const pick = candidates[spreadCursor % candidates.length]; spreadCursor++;
+            return pick;
+          }
+          function resolveTarget(target) {
+            const t = String(target || state.settings.targetAccount || 'zedge_2').toLowerCase();
+            return t === SPREAD ? pickSpreadAccount() : t;
+          }
           function targetDbs(target) {
             const t = String(target || state.settings.targetAccount || 'zedge_2').toLowerCase();
-            if (t === 'all_accounts' || t === 'all_four') return Object.entries(FIREBASE_DB_MAP).map(([name, url]) => ({ name, url }));
+            if (t === 'all_accounts' || t === 'all_four' || t === 'all_three') throw new Error('Sending one image/set to several Zedge accounts is blocked (duplicate content → account suspension). Pick one account, or "spread" to give each item to a different account.');
+            if (t === SPREAD) throw new Error('internal: resolve "spread" to one account first');
             if (FIREBASE_DB_MAP[t]) return [{ name: t, url: FIREBASE_DB_MAP[t] }];
             throw new Error(`Unknown target account "${target}"`);
           }
@@ -3222,9 +3255,39 @@ jobs:
             if (!res.ok) throw new Error(`Firebase push failed (${res.status}): ${(await res.text().catch(() => '')).slice(0, 200)}`);
             return (await res.json()).name;
           }
+          // ─── DUPLICATE-CONTENT LEDGER (survives the whole session, also written to the artifact) ──
+          // sha256 of every JPG that was ever uploaded → { account, firebaseKey, folder, at }. Before any
+          // upload we check every frame of the item: if ANY byte-identical file was already sent to ANY
+          // account (same or different) the distribution is refused. Nothing is uploaded partially.
+          const LEDGER_FILE = path.join(OUT_DIR, 'distribution_ledger.json');
+          let ledger = {};
+          try { ledger = JSON.parse(fs.readFileSync(LEDGER_FILE, 'utf8')); } catch { ledger = {}; }
+          const sha256 = buf => crypto.createHash('sha256').update(buf).digest('hex');
+          function saveLedger() { try { fs.writeFileSync(LEDGER_FILE, JSON.stringify(ledger, null, 2)); } catch (e) { console.error('ledger save failed', e.message); } }
+          function assertNotSentBefore(item, target) {
+            try { assertNotSentBeforeInner(item, target); } catch (e) { log(`🚫 BLOCKED (duplicate-content guard): ${e.message}`); throw e; }
+          }
+          function assertNotSentBeforeInner(item, target) {
+            // 1) item-level lock: an item that already has a Firebase record anywhere can never be sent again
+            if (item.distributed.length) {
+              const acct = item.distributed[0].dbName;
+              throw new Error(`${item.folder} is already in ${acct} (key ${item.distributed[0].key}). One image/set goes to ONE Zedge account only — sending it to ${target === acct ? 'the same account again' : target} would be duplicate content and can get the account suspended.`);
+            }
+            if (item.lockedAccount && item.lockedAccount !== target) throw new Error(`${item.folder} is locked to ${item.lockedAccount}.`);
+            // 2) file-level lock: byte-identical frames must never exist in two records / two R2 folders
+            for (const fr of item.frames) {
+              const h = sha256(fs.readFileSync(fr.localPath));
+              const hit = ledger[h];
+              if (hit) throw new Error(`${item.folder}/${fr.file} is byte-identical to a file already uploaded to ${hit.account} (${hit.folder}, key ${hit.firebaseKey}). Refused — duplicate content across Zedge accounts.`);
+            }
+          }
           async function distributeItem(item, target, opts = {}) {
             if (item.status !== 'done') throw new Error('item is not fully generated');
             if (item.distributeStatus === 'running') return;
+            const resolved = item.lockedAccount && !item.distributed.length ? item.lockedAccount : resolveTarget(target);   // "spread" → one concrete account
+            const [{ name: onlyAccount }] = targetDbs(resolved);
+            assertNotSentBefore(item, onlyAccount);
+            if (String(target).toLowerCase() === SPREAD) log(`🔀 spread: ${item.folder} → ${onlyAccount}`);
             const hasMeta = !!(item.meta && item.meta.title && item.meta.tags && item.meta.category);
             if (state.settings.requireMetadata && !hasMeta && !opts.force) {
               if (state.metaWorker.error && !state.metaWorker.running) throw new Error(`${item.folder}: Gemini worker stopped — ${state.metaWorker.error}. Press Edit and type title / tags / category, or re-export GEMINI_SESSION and start the workflow again.`);
@@ -3232,8 +3295,9 @@ jobs:
               if (item.metaStatus === 'failed') throw new Error(`${item.folder}: metadata failed (${item.metaError || 'Gemini error'}). Press Redo or Edit it manually before distributing.`);
               throw new Error(`${item.folder}: no metadata yet — ${state.metaWorker.available ? 'press 🧠 Generate metadata or Edit it manually' : 'GEMINI_SESSION is missing, so type title / tags / category with Edit'}. Records without metadata are skipped by the Zedge bot.`);
             }
-            item.distributeStatus = 'running'; item.distributeError = ''; saveState();
-            const dbs = targetDbs(target).filter(db => !item.distributed.some(d => d.dbName === db.name));
+            item.distributeStatus = 'running'; item.distributeError = ''; item.lockedAccount = onlyAccount; saveState();
+            const dbs = targetDbs(onlyAccount);      // always exactly one account
+            if (dbs.length !== 1 || FIREBASE_DB_MAP[dbs[0].name] !== dbs[0].url) throw new Error('internal: account routing mismatch — aborted');
             const def = SET_FRAMES[item.type];
             const [w, h] = RATIOS[item.settings.ratio] || RATIOS['9:16'];
             const queuePath = state.settings.queuePath || 'wallpaperQueue';
@@ -3245,8 +3309,9 @@ jobs:
                 for (const fr of item.frames) {
                   const buf = fs.readFileSync(fr.localPath);
                   const name = `${slug(item.concept)}_${fr.file}`;
-                  const fileUrl = await uploadToR2(buf, name, db.name);
-                  const entry = { fileUrl, name, size: buf.length, type: 'image/jpeg', width: w, height: h };
+                  const fileUrl = await uploadToR2(buf, name, db.name);   // R2 key = <db.name>/wallpaper/… — same account as the Firebase DB below
+                  if (!new RegExp(`/${db.name.replace(/^zedge_?/i, 'zedge')}/wallpaper/`, 'i').test(fileUrl) && !/localhost|127\.0\.0\.1/.test(fileUrl)) throw new Error(`R2 returned a URL outside the ${db.name} folder (${fileUrl}) — aborted before writing Firebase`);
+                  const entry = { fileUrl, name, size: buf.length, type: 'image/jpeg', width: w, height: h, sha256: sha256(buf) };
                   files[fr.slot] = entry; totalSize += buf.length;
                   if (!first) first = entry;
                   log(`☁️ [${db.name}] R2 ← ${item.folder}/${fr.file}`);
@@ -3269,6 +3334,8 @@ jobs:
                 const mf = metaFields(item);
                 if (mf) Object.assign(base, mf);
                 const key = await firebasePush(db.url, queuePath, base);
+                for (const e of Object.values(files)) ledger[e.sha256] = { account: db.name, firebaseKey: key, folder: item.folder, file: e.name, at: Date.now() };
+                saveLedger();
                 const snap = mf ? { title: base.title, tags: base.tags, category: base.category, description: base.description, policyCheck: base.policyCheck, policyFlag: base.policyFlag, status: base.status, metadataGeneratedAt: base.metadataGeneratedAt, fetchedAt: Date.now() } : {};
                 item.distributed.push({ dbName: db.name, key, at: Date.now(), meta: snap });
                 log(`🔥 [${db.name}] Firebase key ${key} ← ${item.folder} (${def.contentType})${mf ? ` · "${base.title}" · ${base.category} · policy ${base.policyCheck}${base.status !== 'queued' ? ` · status ${base.status}` : ''}` : ' · ⚠️ NO metadata (bot will skip until the final metadata pass)'}`);
@@ -3548,7 +3615,7 @@ jobs:
               ...state,
               items: state.items.map(i => ({ ...i, frames: i.frames.map(f => ({ ...f, localPath: undefined, thumb: f.status === 'done' ? `/files/${encodeURIComponent(i.folder)}/${encodeURIComponent(f.file)}` : '' })) })),
               creds: { ok: hasCreds(), cloud_name: creds.cloud_name, api_key: creds.api_key ? creds.api_key.slice(0, 4) + '…' : '' },
-              models: TEXT_MODELS, editModels: EDIT_MODELS, ratios: Object.keys(RATIOS), accounts: [...Object.keys(FIREBASE_DB_MAP), 'all_accounts'],
+              models: TEXT_MODELS, editModels: EDIT_MODELS, ratios: Object.keys(RATIOS), accounts: [...Object.keys(FIREBASE_DB_MAP), SPREAD], spreadCounts: spreadCounts().counts,
               startedAt, deadline, now: Date.now(), inFlight,
               totals: {
                 items: state.items.length,
@@ -3614,10 +3681,11 @@ jobs:
             const url = new URL(req.url, `http://localhost:${PORT}`);
             const p = url.pathname;
             if (p === '/healthz') return json(res, 200, { ok: true, finished: state.finished });
+            if (p === '/logo.svg' || p === '/favicon.ico') { res.writeHead(200, { 'Content-Type': 'image/svg+xml', 'Cache-Control': 'public, max-age=86400' }); return res.end(LOGO_SVG); }
             const auth = authed(req, url);
             if (!auth) {
               res.writeHead(401, { 'Content-Type': 'text/html; charset=utf-8' });
-              return res.end('<!doctype html><body style="font-family:system-ui;background:#0b0f14;color:#eee;display:grid;place-items:center;height:100vh"><div><h2>🔒 Image Studio</h2><p>Open the exact link printed in the GitHub Actions log (it contains <code>?k=…</code>).</p></div></body>');
+              return res.end('<!doctype html><body style="font-family:system-ui;background:#0b0f14;color:#eee;display:grid;place-items:center;height:100vh"><link rel="icon" type="image/svg+xml" href="/logo.svg"><div style="text-align:center"><img src="/logo.svg" alt="" style="width:72px;height:72px;border-radius:18px;display:block;margin:0 auto 14px"><h2>🔒 Image Studio</h2><p>Open the exact link printed in the GitHub Actions log (it contains <code>?k=…</code>).</p></div></body>');
             }
             try {
               if (p === '/' || p === '/index.html') {
@@ -3653,7 +3721,8 @@ jobs:
                 if (STRENGTH[s.strength]) state.settings.strength = s.strength;
                 if (typeof s.upscale === 'boolean') state.settings.upscale = s.upscale;
                 if (s.concurrency) state.settings.concurrency = Math.max(1, Math.min(4, parseInt(s.concurrency, 10) || 1));
-                if (s.targetAccount && (FIREBASE_DB_MAP[s.targetAccount] || s.targetAccount === 'all_accounts')) state.settings.targetAccount = s.targetAccount;
+                if (s.targetAccount && (FIREBASE_DB_MAP[s.targetAccount] || s.targetAccount === SPREAD)) state.settings.targetAccount = s.targetAccount;
+                if (Array.isArray(s.spreadPool)) { const pool = [...new Set(s.spreadPool.filter(a => FIREBASE_DB_MAP[a]))]; if (pool.length) state.settings.spreadPool = pool; }
                 if (typeof s.queuePath === 'string' && /^[A-Za-z0-9_\/-]{1,80}$/.test(s.queuePath.trim())) state.settings.queuePath = s.queuePath.trim();
                 if (typeof s.autoDistribute === 'boolean') state.settings.autoDistribute = s.autoDistribute;
                 if (typeof s.requireMetadata === 'boolean') state.settings.requireMetadata = s.requireMetadata;
@@ -3685,6 +3754,7 @@ jobs:
                 const item = state.items.find(i => i.id === body.id);
                 if (!item) throw new Error('item not found');
                 if (item.status === 'running') throw new Error('item is still running');
+                if (item.distributed.length || item.lockedAccount) throw new Error(`${item.folder} is already in ${item.distributed[0] ? item.distributed[0].dbName : item.lockedAccount} — frames cannot be regenerated after distribution (a new record would duplicate it). Add a new prompt instead.`);
                 const which = body.frame;
                 if (typeof which === 'number') {
                   if (!item.frames[which]) throw new Error('frame not found');
@@ -3711,17 +3781,19 @@ jobs:
               }
               if (p === '/api/pause') { state.paused = !!body.paused; log(state.paused ? '⏸ Queue paused' : '▶️ Queue resumed'); saveState(); pump(); return json(res, 200, { ok: true, paused: state.paused }); }
               if (p === '/api/distribute') {
-                const target = body.target || state.settings.targetAccount;
-                targetDbs(target); // validate
+                const target = String(body.target || state.settings.targetAccount).toLowerCase();
+                if (target !== SPREAD) targetDbs(target); else pickSpreadAccount(); // validate
                 let items = body.ids === 'all' ? state.items.filter(i => i.status === 'done') : state.items.filter(i => (body.ids || []).includes(i.id));
-                if (body.ids === 'all') items = items.filter(i => !targetDbs(target).every(db => i.distributed.some(d => d.dbName === db.name)));
+                if (body.ids === 'all') items = items.filter(i => !i.distributed.length && !i.lockedAccount);
+                // Hard guard, synchronous so the panel gets the exact reason: never a second account / second send.
+                for (const it of items) if (it.status === 'done') assertNotSentBefore(it, target === SPREAD ? 'the next account' : targetDbs(target)[0].name);
                 let skipped = 0;
                 if (body.ids === 'all' && state.settings.requireMetadata && !body.force) { const ok = items.filter(i => i.meta && i.meta.title); skipped = items.length - ok.length; items = ok; }
                 if (!items.length) throw new Error(skipped ? `${skipped} item(s) have no metadata yet — wait for Gemini or use Edit (Zedge bot skips records without title/tags/category).` : 'Nothing to distribute (only fully generated, not-yet-distributed items are sent).');
                 // single item without metadata → let distributeItem throw its precise reason back to the panel
                 if (items.length === 1 && state.settings.requireMetadata && !body.force && !(items[0].meta && items[0].meta.title)) await distributeItem(items[0], target);
                 log(`🚀 Distributing ${items.length} item(s) → ${target}${skipped ? ` (${skipped} skipped: no metadata yet)` : ''}`);
-                (async () => { for (const it of items) { try { await distributeItem(it, target, { force: !!body.force }); } catch (e) { /* logged */ } } })();
+                (async () => { for (const it of items) { try { await distributeItem(it, target, { force: !!body.force }); } catch (e) { if (!/^\S+: (Gemini|metadata|no metadata)/.test(e.message)) log(`🚫 ${e.message}`); } } })();
                 return json(res, 200, { ok: true, count: items.length, skipped });
               }
               if (p === '/api/meta/run') {
@@ -3748,9 +3820,13 @@ jobs:
           });
 
           // ─── PANEL (single HTML page; polls /api/state) ────────────────────────────
+          // Brand logo (served at /logo.svg — favicon + panel icon; also used on the 401 page)
+          const LOGO_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024"><path fill="#f5f4e8" d="M0 0h1024v1024H0z"/><path fill="#fe4102" d="M749.547 234.206c7.203-.797 16.731-.127 23.688 1.651a62.8 62.8 0 0 1 37.828 28.361c10.46 17.783 8.385 36.29 8.386 56.031l.017 50.469-.03 158.615-.02 140.609-.011 37.604c-.006 11.604.954 25.94-2.065 37.032-17.484 64.482-118.221 59.355-127.653-7.451-1.673-11.845-.747-28-.723-40.267l.153-58.906c.001-16.78 1.265-30.843-7.498-45.961a54.96 54.96 0 0 0-33.846-25.535c-13.786-3.524-50.501-2.578-64.707.272-28.207 5.659-49.278 29.949-56.365 57.391-2.349 12.084-2.007 25.808-2.248 38.156l-.907 48.032c-.124 10.159.253 22.803-1.987 32.51a58.8 58.8 0 0 1-11.613 23.95 63.56 63.56 0 0 1-42.665 22.964c-17.589 1.852-34.751-2.532-48.486-13.875a61.93 61.93 0 0 1-22.567-42.653c-.665-7.276-.111-17.591.03-25.159q.221-17.03.245-34.06c.349-67.503-.817-118.909 45.282-174.417 33.086-39.84 80.38-62.643 131.946-63.422 20.906-.315 42.737.833 63.553-.267 11.355-.601 24.366-5.902 32.846-13.634 21.158-19.293 19.975-37.268 19.983-62.748l-.011-42.638c.001-10.755-.598-26.029 1.746-36.179a58.5 58.5 0 0 1 12.004-24.36c12.135-14.356 27.325-20.568 45.695-22.115"/><path d="M304.965 233.706c17.092.193 32.223 4.016 45.067 15.744 21.139 19.302 19.942 35.578 21.111 61.08 1.175 25.661 5.881 66.171 25.801 83.712 7.713 6.791 16.95 9.605 27.305 8.861 40.524-2.911 44.31-62.445 48.011-93 1.22-10.075 1.054-21.55 3.647-31.478a55.9 55.9 0 0 1 11.463-21.941c23.442-27.466 66.903-30.825 94.19-7.331 19.416 16.715 20.192 34.448 21.976 57.972l2.446 31.628c2.14 26.223 4.968 53.9 6.607 79.998-31.962.462-56.299-1.685-87.843 6.778-53.461 14.345-88.497 45.502-115.955 92.064-3.629 6.644-6.916 12.637-9.702 19.711-26.756-.251-49.923 11.027-58.658 37.872-3.971 12.207-2.863 28.992-2.92 42.037l-.842 84.927c-.139 10.606.673 29.904-1.274 39.558a55.9 55.9 0 0 1-12.238 25.513 65.14 65.14 0 0 1-44.89 22.791c-17.866 1.44-37.473-3.375-51.287-15.162a61.62 61.62 0 0 1-21.546-42.126c-.561-7.683.65-19.383 1.294-27.404l3.588-42.827 13.355-158.036 11.678-141.16a4507 4507 0 0 1 4.233-50.199c1.775-21.384.924-40.949 16.51-58.015 13.512-14.795 29.226-20.345 48.873-21.567M602.396 581.24c17.51-.242 35.024-.174 52.532.204 2.704 35.764 7.372 71.431 10.1 107.272 2.178 28.609 8.843 57.157-12.849 80.78-13.508 14.711-28.634 19.882-48.201 20.937-16.97.331-34.989-5.692-47.605-17.059-4.895-4.409-18.166-19.346-18.073-25.94.109-7.683 1.033-16.768 1.167-24.692l1.182-59.846c.25-9.987.238-27.379 2.24-36.358a54.23 54.23 0 0 1 13.134-25.261c12.513-13.542 28.321-19.415 46.373-20.037"/></svg>`;
+
           const PANEL_HTML = `<!doctype html>
           <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
           <title>Image Studio · Runner Panel</title>
+          <link rel="icon" type="image/svg+xml" href="/logo.svg"><link rel="apple-touch-icon" href="/logo.svg">
           <style>
           :root{--bg:#0a0d13;--bg2:#0e1219;--surface:#131822;--raised:#1a2130;--line:rgba(255,255,255,.09);--line2:rgba(255,255,255,.16);--txt:#f3f5f9;--muted:rgba(255,255,255,.62);--faint:rgba(255,255,255,.4);
           --acc:#6d8cff;--acc2:#38d6ff;--grad:linear-gradient(135deg,#6d8cff 0%,#38d6ff 100%);--ok:#3ecf8e;--warn:#f5b63d;--err:#ff6b6b;--violet:#a78bfa;--r:12px;--r2:8px}
@@ -3763,9 +3839,8 @@ jobs:
           .top{position:sticky;top:0;z-index:20;backdrop-filter:blur(14px);background:rgba(10,13,19,.72);border-bottom:1px solid var(--line)}
           .top .in{max-width:1560px;margin:0 auto;padding:12px 24px;display:flex;align-items:center;gap:20px;flex-wrap:wrap}
           .brand{display:flex;align-items:center;gap:12px;margin-right:auto}
-          .logo{width:38px;height:38px;border-radius:11px;background:var(--grad);display:grid;place-items:center;box-shadow:0 8px 24px rgba(109,140,255,.35);position:relative;overflow:hidden}
-          .logo::after{content:"";position:absolute;inset:0;background:linear-gradient(180deg,rgba(255,255,255,.35),transparent 55%)}
-          .logo svg{width:20px;height:20px;position:relative;z-index:1}
+          .logo{width:38px;height:38px;border-radius:11px;background:#f2f1e6;display:grid;place-items:center;box-shadow:0 8px 24px rgba(255,69,0,.28),0 0 0 1px rgba(255,255,255,.08);position:relative;overflow:hidden}
+          .logo img{width:38px;height:38px;display:block;border-radius:11px}
           .brand h1{margin:0;font-size:17px;font-weight:700;letter-spacing:-.01em;line-height:1.15}
           .brand small{display:block;font-size:12px;color:var(--muted);font-weight:500}
           .cloud{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);background:rgba(255,255,255,.05);border:1px solid var(--line);padding:4px 10px;border-radius:999px}
@@ -3959,7 +4034,7 @@ jobs:
           </style></head><body>
           <svg width="0" height="0" style="position:absolute"><defs><linearGradient id="g1" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#6d8cff"/><stop offset="1" stop-color="#38d6ff"/></linearGradient></defs></svg>
           <header class="top"><div class="in">
-           <div class="brand"><div class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="#0a0d13" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="3"/><circle cx="9" cy="10" r="1.6"/><path d="M21 16l-5-5-9 9"/></svg></div>
+           <div class="brand"><div class="logo"><img src="/logo.svg" alt="logo"></div>
             <div><h1>Image Studio <span class="cloud off" id="credPill"><i></i><span id="credTxt">no credentials</span></span></h1><small>Runs on the GitHub runner · exposed through Cloudflare tunnel</small></div></div>
            <div class="kpis">
             <div class="kpi"><svg class="ring" viewBox="0 0 36 36"><circle class="bg" cx="18" cy="18" r="15"/><circle class="fg" id="rFrames" cx="18" cy="18" r="15" stroke-dasharray="94.2" stroke-dashoffset="94.2"/></svg><div><b id="tFrames">0 / 0</b><span>frames</span></div></div>
@@ -4024,8 +4099,10 @@ jobs:
              <div class="foot"><button class="btn pri" data-save>Save defaults</button><span class="hint" style="margin:0" id="saveMsg1"></span></div>
             </div>
             <div class="pane" id="pDist">
-             <h3>Distribution</h3><p class="lead">Completed items are uploaded to R2 and queued in Firebase without metadata; the Gemini‑Web job fills title / tags / category.</p>
+             <h3>Distribution</h3><p class="lead">Completed items get Gemini‑Web metadata first, then are uploaded to R2 and queued in Firebase <b>with</b> title / tags / category — each item to exactly one account.</p>
              <div class="g2"><div><label class="l">Target account</label><select id="target"></select></div><div><label class="l">Queue path</label><input id="queuePath"></div></div>
+             <div id="spreadBox" style="margin-top:8px;display:none"><label class="l">Spread across (each item → a different account, balanced)</label><div id="spreadPool" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px"></div></div>
+             <div class="hint" style="font-size:12px;color:var(--muted);margin-top:6px;line-height:1.45">🔒 <b style="color:var(--txt)">One image / set → one Zedge account, always.</b> Choose <b>spread</b> to hand out a big batch: set 1 → zedge_1, set 2 → zedge_2, … (least-loaded account first) — every account gets <i>different</i> files, none gets a file that another account already has. Once distributed, an item is locked to that account (no re-send, no “all accounts”, no frame regeneration). A SHA‑256 ledger also refuses any byte‑identical file that was ever uploaded to any account. Want the same concept in another account? Add the prompt again — it renders a different image.</div>
              <div style="margin-top:14px">
               <label class="sw"><span class="t">Auto‑distribute<small>Send each item as soon as all of its frames are done</small></span><input type="checkbox" id="autoDistribute"><span class="k"></span></label>
               <label class="sw"><span class="t">Gemini metadata before distribute<small>As soon as a set / image is rendered, Gemini Web writes title · tags · category · description + Zedge policy check (same script as <code>metadata</code> mode)</small></span><input type="checkbox" id="autoMetadata"><span class="k"></span></label>
@@ -4079,13 +4156,13 @@ jobs:
           const typeCls=t=>t==='24-HOUR'?'T24':t;
           const ACCTS=['zedge_1','zedge_2','zedge_3','zedge_4'];const acls=a=>'z'+String(a).replace(/\\D/g,'');
           const fmtT=ms=>{const d=new Date(ms);return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0')};
-          const targetsOf=t=>t==='all_accounts'?ACCTS:[t];
+          const targetsOf=t=>[t];
           function sentRow(i){
            const cur=$('#target')?$('#target').value:S.settings.targetAccount;
            const sentTo=new Set(i.distributed.map(d=>d.dbName));
-           if(!i.distributed.length&&i.distributeStatus!=='running'&&!i.distributeError) return \`<div class="sent"><span class="lbl">Sent to</span><span class="none">Not distributed yet\${i.status==='done'?\` · target: <b style="color:var(--txt)">\${esc(cur)}</b>\`:''}</span></div>\`;
+           if(!i.distributed.length&&i.distributeStatus!=='running'&&!i.distributeError) return \`<div class="sent"><span class="lbl">Sent to</span><span class="none">Not distributed yet\${i.status==='done'?\` · target: <b style="color:var(--txt)">\${cur==='spread'?'spread (next free account)':esc(cur)}</b>\`:''}</span></div>\`;
            const badges=i.distributed.map(d=>{const st=d.meta&&d.meta.status||'';const cls=st==='failed'?' fail':st&&st!=='queued'?' up':'';return \`<span class="acct \${acls(d.dbName)}" title="Firebase key \${esc(d.key)} · \${new Date(d.at).toLocaleString()}\${d.meta&&d.meta.error?' · '+esc(d.meta.error):''}">\${esc(d.dbName)}<small class="\${cls.trim()}">\${esc(d.key)} · \${fmtT(d.at)}\${st?' · '+esc(st)+(d.meta.policyCheck==='held'?' (held)':''):''}</small></span>\`}).join('');
-           const pending=i.distributeStatus==='running'?targetsOf(cur).filter(a=>!sentTo.has(a)).map(a=>\`<span class="acct pending">\${esc(a)}<small>uploading…</small></span>\`).join(''):'';
+           const pending=i.distributeStatus==='running'?targetsOf(i.lockedAccount||cur).filter(a=>!sentTo.has(a)&&a!=='spread').map(a=>\`<span class="acct pending">\${esc(a)}<small>uploading…</small></span>\`).join(''):'';
            const failed=i.distributeError&&i.distributeStatus!=='running'?i.distributeError.split(' · ').map(x=>{const m=x.match(/^(zedge_\\d)/);return m&&!sentTo.has(m[1])?\`<span class="acct err" title="\${esc(x)}">\${esc(m[1])}<small>failed</small></span>\`:''}).join(''):'';
            return \`<div class="sent"><span class="lbl">Sent to</span>\${badges}\${pending}\${failed}</div>\`}
           const tagList=t=>Array.isArray(t)?t:String(t||'').split(/[,;]+/).map(x=>x.trim()).filter(Boolean);
@@ -4111,15 +4188,14 @@ jobs:
            else body=\`<div class="mbody"><div class="wait">\${!mw.available?'GEMINI_SESSION missing — type the metadata with Edit (records without it are skipped by the Zedge bot).':S.settings.autoMetadata?'no metadata yet — press 🧠 Generate metadata or Edit':'auto metadata is off — press 🧠 Generate metadata or Edit'}</div></div>\`;
            return \`<div class="metab">\${head}\${body}</div>\`}
           function distBtn(i){
-           const cur=$('#target')?$('#target').value:S.settings.targetAccount;const sentTo=new Set(i.distributed.map(d=>d.dbName));
-           const remaining=targetsOf(cur).filter(a=>!sentTo.has(a));
-           if(i.distributeStatus==='running') return \`<button class="btn sec sm" disabled>Distributing…</button>\`;
-           if(!remaining.length) return \`<button class="btn sec sm" disabled title="Already sent to \${esc(cur)}">✓ Sent to \${esc(cur==='all_accounts'?'all 4':cur)}</button>\`;
-           const tgt=esc(cur==='all_accounts'?(remaining.length===4?'all 4':remaining.map(a=>a.replace('zedge_','z')).join('+')):cur);
+           const cur=$('#target')?$('#target').value:S.settings.targetAccount;
+           if(i.distributeStatus==='running') return \`<button class="btn sec sm" disabled>Distributing → \${esc(i.lockedAccount||cur)}…</button>\`;
+           const tl=cur==='spread'?'next account (spread)':cur;
+           if(i.distributed.length) return \`<button class="btn sec sm" disabled title="One image/set = one Zedge account. Locked to \${esc(i.distributed[0].dbName)} — it can never be sent to another account.">🔒 Only in \${esc(i.distributed[0].dbName)}</button>\`;
            const hasMeta=!!(i.meta&&i.meta.title);
-           if(S.settings.requireMetadata&&!hasMeta) return \`<button class="btn sec sm" onclick="dist(\${i.id})" title="Records without title/tags/category are skipped by the Zedge bot — waiting for Gemini, or press Edit">⏳ Metadata first → \${tgt}</button>\`;
-           if(hasMeta&&i.meta.policyCheck==='held') return \`<button class="btn hold sm" onclick="dist(\${i.id},true)" title="Pushed as status failed / policyCheck held — review in the app before requeue">🛑 Distribute held → \${tgt}</button>\`;
-           return \`<button class="btn \${i.distributed.length?'sec':'pri'} sm" onclick="dist(\${i.id})" title="Send to \${remaining.join(', ')} with metadata">Distribute → \${tgt}</button>\`}const fmtB=b=>b>=1048576?(b/1048576).toFixed(1)+' MB':Math.round(b/1024)+' KB';
+           if(S.settings.requireMetadata&&!hasMeta) return \`<button class="btn sec sm" onclick="dist(\${i.id})" title="Records without title/tags/category are skipped by the Zedge bot — waiting for Gemini, or press Edit">⏳ Metadata first → \${esc(tl)}</button>\`;
+           if(hasMeta&&i.meta.policyCheck==='held') return \`<button class="btn hold sm" onclick="dist(\${i.id},true)" title="Pushed as status failed / policyCheck held — review in the app before requeue">🛑 Distribute held → \${esc(tl)}</button>\`;
+           return \`<button class="btn pri sm" onclick="dist(\${i.id})" title="Send to \${esc(tl)} only — this locks the item to that account">Distribute → \${esc(tl)}</button>\`}const fmtB=b=>b>=1048576?(b/1048576).toFixed(1)+' MB':Math.round(b/1024)+' KB';
           const setMsg=(el,txt,cls)=>{el.textContent=txt;el.className='msg on '+(cls||'')};
 
           /* tabs */
@@ -4134,15 +4210,16 @@ jobs:
           function fillSettings(){const s=S.settings;
            $('#model').innerHTML=S.models.map(m=>\`<option\${m===s.model?' selected':''}>\${m}</option>\`).join('');
            $('#ratio').innerHTML=S.ratios.map(r=>\`<option\${r===s.ratio?' selected':''}>\${r}</option>\`).join('');
-           $('#target').innerHTML=S.accounts.map(a=>\`<option\${a===s.targetAccount?' selected':''}>\${a}</option>\`).join('');
+           $('#target').innerHTML=S.accounts.map(a=>\`<option value="\${a}"\${a===s.targetAccount?' selected':''}>\${a==='spread'?'spread — each item to a different account':a}</option>\`).join('');
+           $('#spreadPool').innerHTML=ACCTS.map(a=>\`<label class="chip" style="cursor:pointer;display:inline-flex;gap:6px;align-items:center"><input type="checkbox" class="sp" value="\${a}"\${(s.spreadPool||ACCTS).includes(a)?' checked':''}>\${a} <b style="color:var(--faint)">\${(S.spreadCounts||{})[a]??0}</b></label>\`).join('');$('#spreadBox').style.display=$('#target').value==='spread'?'':'none';
            $('#res').value=s.res;$('#concurrency').value=s.concurrency;$('#boost').value=s.boost;$('#display').value=s.display;$('#strength').value=s.strength;$('#upscale').checked=s.upscale;
            $('#queuePath').value=s.queuePath;$('#autoDistribute').checked=s.autoDistribute;$('#requireMetadata').checked=s.requireMetadata;$('#runMetadata').checked=s.runMetadata;$('#autoMetadata').checked=s.autoMetadata;$('#autoFinish').value=s.autoFinishMinutes;$('#c_cloud').value=S.creds.cloud_name||''}
 
           function itemCard(i){
            const done=i.frames.filter(f=>f.status==='done').length,n=i.frames.length;
            const shape=i.type==='SINGLE'&&i.settings.ratio!=='9:16'?(i.settings.ratio==='1:1'?' sq':(i.settings.ratio==='16:9'||i.settings.ratio==='4:3')?' land':''):'';
-           const frames=i.frames.map((f,k)=>\`<div class="fr \${f.status}\${shape}" title="\${esc(f.name)}\${f.error?' — '+esc(f.error):''}">\${f.status==='done'?\`<img src="\${f.thumb}" loading="lazy" alt="\${esc(f.file)}" onclick="lb('\${f.thumb}','\${esc(i.folder)} · \${esc(f.file)}')">\`:\`<div class="ph">\${f.status==='running'?'rendering…':f.status==='failed'?'failed':'queued'}</div>\`}\${i.status!=='running'?\`<button class="re" title="Regenerate \${esc(f.name)}" onclick="retry(\${i.id},\${k})">\${RE}</button>\`:''}<div class="cap">\${esc(f.name)}</div></div>\`).join('');
-           const dist=i.distributed.length?\`<span class="st dist">↗ \${i.distributed.length}/4 accounts</span>\`:'';const mst=i.status==='done'&&i.meta&&i.meta.title?\`<span class="st dist" style="color:\${i.meta.policyCheck==='held'?'#ffb3b3':'#9ef0c6'}">\${i.meta.policyCheck==='held'?'🛑 held':'🧠 meta ✓'}</span>\`:'';
+           const frames=i.frames.map((f,k)=>\`<div class="fr \${f.status}\${shape}" title="\${esc(f.name)}\${f.error?' — '+esc(f.error):''}">\${f.status==='done'?\`<img src="\${f.thumb}" loading="lazy" alt="\${esc(f.file)}" onclick="lb('\${f.thumb}','\${esc(i.folder)} · \${esc(f.file)}')">\`:\`<div class="ph">\${f.status==='running'?'rendering…':f.status==='failed'?'failed':'queued'}</div>\`}\${i.status!=='running'&&!i.distributed.length?\`<button class="re" title="Regenerate \${esc(f.name)}" onclick="retry(\${i.id},\${k})">\${RE}</button>\`:''}<div class="cap">\${esc(f.name)}</div></div>\`).join('');
+           const dist=i.distributed.length?\`<span class="st dist">🔒 \${esc(i.distributed[0].dbName)} only</span>\`:'';const mst=i.status==='done'&&i.meta&&i.meta.title?\`<span class="st dist" style="color:\${i.meta.policyCheck==='held'?'#ffb3b3':'#9ef0c6'}">\${i.meta.policyCheck==='held'?'🛑 held':'🧠 meta ✓'}</span>\`:'';
            const busyDist='';
            return \`<article class="item \${i.status}" data-id="\${i.id}">
             <div class="ih"><div class="idx">\${String(i.index).padStart(2,'0')}</div><div class="ttl"><b title="\${esc(i.folder)}">\${esc(i.concept)}</b><small><span class="type \${typeCls(i.type)}">\${i.type}</span><span>\${esc(i.settings.model)}</span><span>· \${i.settings.res}\${i.type==='SINGLE'?' · '+i.settings.ratio:''}</span></small></div>
@@ -4201,13 +4278,13 @@ jobs:
           window.dist=async(id,held)=>{if(held&&!confirm('This item is on Zedge policy hold. It will be pushed as status FAILED / policyCheck HELD (visible in the app\\'s Failed section, not uploaded). Continue?'))return;try{const r=await api('/api/distribute',{ids:[id],target:$('#target').value});toast(\`Distributing \${r.count} item → \${$('#target').value}\`,'good')}catch(e){toast(e.message,'bad')}poll()};
           $('#distAllBtn').onclick=async()=>{try{const r=await api('/api/distribute',{ids:'all',target:$('#target').value});toast(\`Distributing \${r.count} item(s) → \${$('#target').value}\${r.skipped?\` · \${r.skipped} waiting for metadata\`:''}\`,'good')}catch(e){toast(e.message,'bad')}poll()};
           $('#pauseBtn').onclick=async()=>{await api('/api/pause',{paused:!S.paused});poll()};
-          document.addEventListener('change',e=>{if(e.target&&e.target.id==='target'&&S)render()});
+          document.addEventListener('change',e=>{if(e.target&&e.target.id==='target'&&S){$('#spreadBox').style.display=e.target.value==='spread'?'':'none';render()}});
           $$('#filters button').forEach(b=>b.onclick=()=>{filter=b.dataset.f;$$('#filters button').forEach(x=>x.classList.toggle('on',x===b));render()});
           $('#consoleBar').onclick=()=>{const c=$('#console');c.classList.toggle('open');$('#consoleHint').textContent=c.classList.contains('open')?'▼ close':'▲ open';if(c.classList.contains('open')){const lg=$('#log');lg.scrollTop=lg.scrollHeight}};
           $('#finishBtn').onclick=async()=>{const nd=S.items.filter(i=>i.status==='done'&&!i.distributed.length).length,busy=S.items.filter(i=>i.status==='running'||i.status==='queued').length;
            if(!confirm(\`Finish the session?\${busy?\`\\n• \${busy} item(s) still queued/rendering will be abandoned.\`:''}\${nd?\`\\n• \${nd} completed item(s) are NOT distributed (they stay in the ZIP artifact).\`:''}\${S.settings.runMetadata&&S.totals.records>S.totals.metaReady?'\\n• The final Gemini‑Web metadata pass runs next for records still missing metadata.':''}\`))return;await api('/api/finish');toast('Finishing session…');poll()};
           $$('[data-save]').forEach(b=>b.onclick=async()=>{const pane=b.closest('.pane'),msgEl=pane.querySelector('[id^=saveMsg]');try{
-           const settings={model:$('#model').value,res:$('#res').value,ratio:$('#ratio').value,boost:$('#boost').value,display:$('#display').value,strength:$('#strength').value,upscale:$('#upscale').checked,concurrency:$('#concurrency').value,targetAccount:$('#target').value,queuePath:$('#queuePath').value,autoDistribute:$('#autoDistribute').checked,requireMetadata:$('#requireMetadata').checked,runMetadata:$('#runMetadata').checked,autoMetadata:$('#autoMetadata').checked,autoFinishMinutes:$('#autoFinish').value};
+           const settings={model:$('#model').value,res:$('#res').value,ratio:$('#ratio').value,boost:$('#boost').value,display:$('#display').value,strength:$('#strength').value,upscale:$('#upscale').checked,concurrency:$('#concurrency').value,targetAccount:$('#target').value,spreadPool:$$('#spreadPool .sp:checked').map(x=>x.value),queuePath:$('#queuePath').value,autoDistribute:$('#autoDistribute').checked,requireMetadata:$('#requireMetadata').checked,runMetadata:$('#runMetadata').checked,autoMetadata:$('#autoMetadata').checked,autoFinishMinutes:$('#autoFinish').value};
            const credentials={cloud_name:$('#c_cloud').value.trim(),api_key:$('#c_key').value.trim(),api_secret:$('#c_secret').value.trim()};
            const r=await api('/api/settings',{settings,credentials});msgEl.textContent='Saved ✓'+(r.creds.ok?'':' · keys still missing');$('#c_key').value='';$('#c_secret').value='';toast('Settings saved','good')}catch(e){msgEl.textContent=e.message;toast(e.message,'bad')}poll()});
           $('#addBtn').onclick=async()=>{const m=$('#addMsg');try{$('#addBtn').disabled=true;const r=await api('/api/prompts',{text:$('#ptext').value,type:document.querySelector('input[name=ptype]:checked').value,copies:$('#copies').value});
@@ -4303,6 +4380,8 @@ jobs:
             echo "- As soon as a set / image is rendered, **Gemini Web writes its title · tags · category · description + Zedge policy check** (same image_metadata.mjs). You can Edit / Redo it on the card."
             echo "- **Distribute** then sends the JPGs to R2 and pushes the Firebase record **with the metadata already inside** (ringtone-job order) — the Zedge bot never skips it for missing metadata. Policy-flagged items are pushed as status failed / held."
             echo "- **Finish session** ends the panel; a final Firebase-scan metadata pass runs only if some record was pushed without metadata."
+            echo "- 🔀 Target **spread** hands a batch out across zedge_1–4 (each set/image to a different, least-loaded account); the per-account checkboxes choose which accounts take part."
+            echo "- 🔒 **One image / set → one Zedge account.** Distributed items are locked; re-sending to another (or the same) account is refused, frames cannot be regenerated after distribution, and a SHA-256 ledger (\`distribution_ledger.json\` in the artifact) blocks any byte-identical file ever uploaded before."
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"
 
