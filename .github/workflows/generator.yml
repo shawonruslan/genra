@@ -480,7 +480,7 @@ jobs:
           - 100% ORIGINAL work only. Never name, reference, imitate or hint at any real artist, band, singer, song, lyric, album, film, TV show, game, anime, cartoon, comic, character, franchise, brand, company, product, logo, trademark, sports team, celebrity or public figure. No "in the style of", no "sounds like", no theme/cover/remix of anything existing.
           - No sexual, suggestive, nude or adult content. No hate speech, slurs, hate symbols, discrimination or stereotypes. No violence, gore, weapons, drugs, self-harm or illegal activity. Nothing involving minors.
           - Metadata must be truthful and describe ONLY this item. No promotional or spam words (free, download, app, website, subscribe, follow, link, buy), no URLs, hashtags, @handles, emojis, brand or service names, no misleading keywords.
-          - Keywords: between 2 and 10 genuine descriptive single words.`;
+          - Keywords: between 2 and 10 genuine descriptive single words. The category name (or any word of it) must NOT be used as a keyword.`;
           const POLICY_PROMO = /\b(free|download|downloads|website|subscribe|follow|buy|sale|discount|promo|www|http|https|telegram|whatsapp|instagram|tiktok|youtube|facebook|twitter|zedge)\b/i;
           const POLICY_ADULT = /\b(sexy|sex|sexual|nude|nudity|naked|porn|porno|xxx|erotic|erotica|boobs|breasts?|booty|bikini|lingerie|topless|hot girls?|seductive|nsfw|hentai|fetish|stripper|thong|underwear|cleavage)\b/i;
           const POLICY_HARM = /\b(nigg\w*|fagg?\w*|retard\w*|murder|gore|gun|guns|rifle|pistol|shooting|shooter|terror\w*|nazi|hitler|swastika|isis|jihad|marijuana|cocaine|heroin|meth|drugs|suicide|self-harm|rape|racist|slur)\b/i;
@@ -511,10 +511,14 @@ jobs:
             const issues = zedgePolicyIssues(meta);
             const tags = zedgeCleanTags(meta.tags);
             const fallback = kind === 'image' ? ['wallpaper', 'background', 'art', 'design', 'phone', 'screen'] : ['melody', 'tune', 'alert', 'phone', 'music', 'sound'];
-            const cat = String(meta.category || '').toLowerCase().replace(/[^a-z]/g, '');
-            if (cat && cat !== 'other' && !tags.includes(cat)) tags.unshift(cat);
-            for (const w of fallback) { if (tags.length >= 2) break; if (!tags.includes(w)) tags.push(w); }
-            return { issues, meta: { ...meta, tags: tags.slice(0, 10).join(', ') } };
+            // Zedge rule: the CATEGORY NAME must never appear as a keyword/tag (whole name, its words, singular/plural).
+            const catWords = String(meta.category || '').toLowerCase().split(/[^a-z]+/).filter(w => w.length > 1 && w !== 'n' && w !== 'and');
+            const catFull = String(meta.category || '').toLowerCase().replace(/[^a-z]/g, '');
+            const stem = w => String(w).replace(/(ies|es|s)$/, '');
+            const isCatWord = t => { const ts = stem(t); return t === catFull || ts === stem(catFull) || catWords.some(c => c === t || stem(c) === ts); };
+            const clean = tags.filter(t => !isCatWord(t));
+            for (const w of fallback) { if (clean.length >= 2) break; if (!clean.includes(w) && !isCatWord(w)) clean.push(w); }
+            return { issues, meta: { ...meta, tags: clean.slice(0, 10).join(', ') } };
           }
           // ─── METADATA GENERATION ───────────────────────────────────────────────────
           // ─── SMART PROMPT VARIETY ENGINE ─────────────────────────────────────────
@@ -2018,7 +2022,7 @@ jobs:
           - 100% ORIGINAL work only. Never name, reference, imitate or hint at any real artist, band, singer, song, lyric, album, film, TV show, game, anime, cartoon, comic, character, franchise, brand, company, product, logo, trademark, sports team, celebrity or public figure. No "in the style of", no "sounds like", no theme/cover/remix of anything existing.
           - No sexual, suggestive, nude or adult content. No hate speech, slurs, hate symbols, discrimination or stereotypes. No violence, gore, weapons, drugs, self-harm or illegal activity. Nothing involving minors.
           - Metadata must be truthful and describe ONLY this item. No promotional or spam words (free, download, app, website, subscribe, follow, link, buy), no URLs, hashtags, @handles, emojis, brand or service names, no misleading keywords.
-          - Keywords: between 2 and 10 genuine descriptive single words.`;
+          - Keywords: between 2 and 10 genuine descriptive single words. The category name (or any word of it) must NOT be used as a keyword.`;
           const POLICY_PROMO = /\b(free|download|downloads|website|subscribe|follow|buy|sale|discount|promo|www|http|https|telegram|whatsapp|instagram|tiktok|youtube|facebook|twitter|zedge)\b/i;
           const POLICY_ADULT = /\b(sexy|sex|sexual|nude|nudity|naked|porn|porno|xxx|erotic|erotica|boobs|breasts?|booty|bikini|lingerie|topless|hot girls?|seductive|nsfw|hentai|fetish|stripper|thong|underwear|cleavage)\b/i;
           const POLICY_HARM = /\b(nigg\w*|fagg?\w*|retard\w*|murder|gore|gun|guns|rifle|pistol|shooting|shooter|terror\w*|nazi|hitler|swastika|isis|jihad|marijuana|cocaine|heroin|meth|drugs|suicide|self-harm|rape|racist|slur)\b/i;
@@ -2049,10 +2053,14 @@ jobs:
             const issues = zedgePolicyIssues(meta);
             const tags = zedgeCleanTags(meta.tags);
             const fallback = kind === 'image' ? ['wallpaper', 'background', 'art', 'design', 'phone', 'screen'] : ['melody', 'tune', 'alert', 'phone', 'music', 'sound'];
-            const cat = String(meta.category || '').toLowerCase().replace(/[^a-z]/g, '');
-            if (cat && cat !== 'other' && !tags.includes(cat)) tags.unshift(cat);
-            for (const w of fallback) { if (tags.length >= 2) break; if (!tags.includes(w)) tags.push(w); }
-            return { issues, meta: { ...meta, tags: tags.slice(0, 10).join(', ') } };
+            // Zedge rule: the CATEGORY NAME must never appear as a keyword/tag (whole name, its words, singular/plural).
+            const catWords = String(meta.category || '').toLowerCase().split(/[^a-z]+/).filter(w => w.length > 1 && w !== 'n' && w !== 'and');
+            const catFull = String(meta.category || '').toLowerCase().replace(/[^a-z]/g, '');
+            const stem = w => String(w).replace(/(ies|es|s)$/, '');
+            const isCatWord = t => { const ts = stem(t); return t === catFull || ts === stem(catFull) || catWords.some(c => c === t || stem(c) === ts); };
+            const clean = tags.filter(t => !isCatWord(t));
+            for (const w of fallback) { if (clean.length >= 2) break; if (!clean.includes(w) && !isCatWord(w)) clean.push(w); }
+            return { issues, meta: { ...meta, tags: clean.slice(0, 10).join(', ') } };
           }
           // ─── FIREBASE: PATCH METADATA ─────────────────────────────────────────────
           async function firebasePatchMetadata(dbUrl, queuePath, key, metadata) {
@@ -2526,7 +2534,7 @@ jobs:
               `${kindContext}\n` +
               `Look at the attached image carefully and generate the following metadata:\n` +
               `1. A creative and UNIQUE TITLE (max 25 characters). Use evocative, descriptive words. Avoid generic filler words like "beautiful", "amazing", "stunning". No quotes.\n` +
-              `2. 15 relevant, descriptive single-word KEYWORDS (comma-separated). Cover the subject, colors, mood, style, and use-case.\n` +
+              `2. 15 relevant, descriptive single-word KEYWORDS (comma-separated). Cover the subject, colors, mood, style, and use-case. NEVER use the category name (or any word of it, singular or plural) as a keyword.\n` +
               `3. The most appropriate CATEGORY selected ONLY from this list: ${validCategories}.\n` +
               `4. A SHORT description in MAXIMUM 5 WORDS. No punctuation, no full sentences.\n` +
               `5. POLICY verdict: write OK if this image is clearly safe and original under the policy above. Otherwise write FLAG: <short reason> — flag any recognizable copyrighted character, franchise art, brand/logo/trademark, celebrity or real identifiable person (selfie, family photo), text watermark, sexual/suggestive content, hate symbol, violence, weapons, drugs, apparent minors, or a stretched / blurry / badly cropped low-quality image.\n\n` +
@@ -2688,6 +2696,10 @@ jobs:
             console.log(`\n🗂️  Local-jobs mode — watching ${jobsDir} (Image Studio). Firebase scan is skipped.`);
             console.log('   READY_FOR_LOCAL_JOBS');
             let idleTicks = 0;
+            // Gemini-Web safety: sequential jobs, a growing pause after each failure, and a real cool-down
+            // (page reload + 60–180 s rest) after 3 failures in a row, so retries never hammer Gemini.
+            let consecutiveFailures = 0;
+            const pauseAfterFailure = () => Math.min(90000, 8000 * Math.pow(2, Math.max(0, consecutiveFailures - 1)));
             while (!fs.existsSync(stopFile)) {
               const files = fs.readdirSync(jobsDir).filter(f => f.endsWith('.json')).sort();
               if (!files.length) {
@@ -2704,7 +2716,8 @@ jobs:
                 catch (e) { console.error(`  ❌ [local] bad job file ${f}: ${e.message}`); try { fs.unlinkSync(jobPath); } catch {} continue; }
                 const id = String(job.id || path.basename(f, '.json'));
                 const kind = SET_KINDS[job.kind] ? job.kind : 'WALLPAPER';
-                console.log(`\n  [local] Key: ${id} — ${kindLabel(kind)} (${path.basename(job.imagePath || '')})`);
+                if (job.notBefore && Date.now() < job.notBefore) continue;   // retry scheduled for later by the studio
+                console.log(`\n  [local] Key: ${id} — ${kindLabel(kind)} (${path.basename(job.imagePath || '')})${job.attempt > 1 ? ` · retry ${job.attempt}` : ''}`);
                 const out = { id, kind, imagePath: job.imagePath, startedAt: Date.now() };
                 try {
                   if (!job.imagePath || !fs.existsSync(job.imagePath)) throw new Error(`image file not found: ${job.imagePath}`);
@@ -2726,16 +2739,27 @@ jobs:
                   });
                   if (reason) { totalHeld++; console.warn(`  🛑 [local] [${id}] HELD (Zedge policy): ${reason}`); }
                   else { totalSuccess++; console.log(`  ✅ [local] [${id}] Metadata generated: "${check.meta.title}" · ${check.meta.category}`); }
+                  consecutiveFailures = 0;
                 } catch (err) {
-                  totalFailed++;
-                  Object.assign(out, { ok: false, error: err.message, finishedAt: Date.now() });
+                  totalFailed++; consecutiveFailures++;
+                  Object.assign(out, { ok: false, error: err.message, consecutiveFailures, finishedAt: Date.now() });
                   console.error(`  ❌ [local] [${id}] Failed: ${err.message}`);
                 }
                 const tmp = path.join(resDir, `${id}.json.tmp`);
                 fs.writeFileSync(tmp, JSON.stringify(out));
                 fs.renameSync(tmp, path.join(resDir, `${id}.json`));
                 try { fs.unlinkSync(jobPath); } catch {}
-                await sleep(2000);
+                if (consecutiveFailures >= 3) {
+                  const rest = Math.min(180000, 60000 * (consecutiveFailures - 2));
+                  console.warn(`  🧊 [local] ${consecutiveFailures} failures in a row — cooling down ${Math.round(rest / 1000)} s and reloading Gemini Web`);
+                  try { await geminiPage.goto('https://gemini.google.com/app', { waitUntil: 'domcontentloaded', timeout: 30000 }); } catch {}
+                  await sleep(rest);
+                } else if (consecutiveFailures > 0) {
+                  console.log(`  ⏳ [local] pausing ${Math.round(pauseAfterFailure() / 1000)} s after a failure`);
+                  await sleep(pauseAfterFailure());
+                } else {
+                  await sleep(2000);
+                }
               }
             }
             console.log('\n🛑 [local] stop requested — closing Gemini browser.');
@@ -2879,8 +2903,9 @@ jobs:
           import http from 'http';
           import fs from 'fs';
           import path from 'path';
-          import { execSync, spawn } from 'child_process';
+          import { execSync, execFile, spawn } from 'child_process';
           import crypto from 'crypto';
+          import zlib from 'zlib';
 
           // ─── CONFIG ────────────────────────────────────────────────────────────────
           const PORT            = parseInt(process.env.STUDIO_PORT || '8787', 10);
@@ -2888,7 +2913,7 @@ jobs:
           const TIMEOUT_MIN     = Math.min(330, Math.max(5, parseInt(process.env.STUDIO_TIMEOUT_MINUTES || '240', 10) || 240)); // GitHub job hard limit is 360 min
           const OUT_DIR         = process.env.STUDIO_OUT_DIR || '/tmp/studio_out';
           const RESULT_FILE     = process.env.STUDIO_RESULT_FILE || '/tmp/studio_result.json';
-          const R2_WORKER_URL   = process.env.R2_WORKER_URL || 'https://frosty-pine-2f7dzedge-r2-gateway.holaexplainer.workers.dev';
+          const R2_WORKER_URL   = process.env.R2_WORKER_URL || 'https://frosty-pine-2f7dzedge-r2-gateway.holaexplainer.workers.dev'; // <-- CONFIG: your Cloudflare R2 worker URL (same as the ringtone job)
           const METADATA_SCRIPT = process.env.METADATA_SCRIPT || path.resolve('image_metadata.mjs');
           const GEMINI_AVAILABLE = !!((process.env.GEMINI_SESSION_INPUT || '').trim() || (process.env.GEMINI_SESSION || '').trim());
           const META_DIR = process.env.STUDIO_META_DIR || '/tmp/studio_meta';   // job/result hand-off with image_metadata.mjs (local-jobs mode)
@@ -2897,6 +2922,7 @@ jobs:
           const DELIVERY_BASE   = process.env.STUDIO_DELIVERY_BASE || 'https://res.cloudinary.com';
           const WALL_W = 1620, WALL_H = 2880;
 
+          // <-- CONFIG: your Firebase Realtime Database URLs — MUST be the same as in the ringtone job and image_metadata.mjs above
           const FIREBASE_DB_MAP = {
             zedge_1: 'https://zedgeautomation-default-rtdb.firebaseio.com',
             zedge_2: 'https://zedge-automation-2-default-rtdb.asia-southeast1.firebasedatabase.app',
@@ -3014,16 +3040,18 @@ jobs:
               queuePath: (process.env.IMAGE_QUEUE_PATH || 'wallpaperQueue').trim(),
               autoDistribute: false,
               requireMetadata: true,
+              metaAutoRetry: 4,                                      // automatic Gemini retries per item (backoff 45 s → 2 → 5 → 10 min), 0 = off
               spreadPool: Object.keys(FIREBASE_DB_MAP),                 // accounts used by target "spread" (each item → one account, round-robin balanced)                                 // never push a record without title/tags/category (the Zedge bot skips those)
               runMetadata: (process.env.STUDIO_AUTO_METADATA || 'true') !== 'false',
               autoMetadata: (process.env.STUDIO_AUTO_METADATA || 'true') !== 'false',
               autoFinishMinutes: 0
             },
             // Gemini-Web metadata worker = image_metadata.mjs in local-jobs mode (one browser, stays open for the whole session)
-            metaWorker: { available: GEMINI_AVAILABLE && fs.existsSync(METADATA_SCRIPT), running: false, ready: false, startedAt: 0, current: '', queued: 0, done: 0, held: 0, failed: 0, restarts: 0, error: '', lastExit: null },
+            metaWorker: { available: GEMINI_AVAILABLE && fs.existsSync(METADATA_SCRIPT), running: false, ready: false, startedAt: 0, current: '', queued: 0, done: 0, held: 0, failed: 0, retries: 0, restarts: 0, error: '', lastExit: null, cooldownUntil: 0 },
             items: [],
             log: [],
             paused: false,
+            quotaHit: '',          // set when Cloudinary answers "Generation limit exceeded" → queue auto-pauses instead of burning retries
             finished: false,
             finishReason: ''
           };
@@ -3044,11 +3072,14 @@ jobs:
           function log(msg) {
             const line = `[${new Date().toISOString().slice(11, 19)}] ${msg}`;
             console.log(line);
+            stateVersion++;
             state.log.push(line);
             if (state.log.length > 400) state.log.splice(0, state.log.length - 400);
           }
+          let stateVersion = 1;
           let saveTimer = null;
           function saveState() {
+            stateVersion++;
             clearTimeout(saveTimer);
             saveTimer = setTimeout(() => {
               try { fs.writeFileSync(STATE_FILE, JSON.stringify({ ...state, log: undefined }, null, 2)); } catch (e) { console.error('state save failed', e.message); }
@@ -3152,11 +3183,19 @@ jobs:
                 const localPath = path.join(dir, fdef.file);
                 fs.writeFileSync(localPath, buf);
                 frame.url = url; frame.localPath = localPath; frame.size = buf.length; frame.status = 'done'; frame.error = '';
+                makeThumb(item, frame);
                 log(`✅ ${item.folder}/${fdef.file} (${(buf.length / 1024).toFixed(0)} KB)`);
                 saveState();
                 return true;
               } catch (err) {
                 lastErr = err;
+                // Cloudinary AI-generation quota exhausted (MG_00602 "Generation limit exceeded") → retrying is pointless.
+                // Pause the whole queue once, keep the remaining frames QUEUED (not failed) so they resume after new keys / upgrade.
+                if (/generation limit exceeded|MG_00602|quota|rate limit exceeded|402/i.test(err.message)) {
+                  if (!state.quotaHit) { state.quotaHit = err.message; state.paused = true; log(`⛔ Cloudinary generation limit reached — queue paused. Upgrade the plan or enter another cloud's keys (Keys tab), then press Resume + Retry failed. (${err.message.slice(0, 120)})`); }
+                  frame.status = 'queued'; frame.error = err.message; saveState();
+                  return false;
+                }
                 log(`⚠️ ${item.folder}/${fdef.file} attempt ${attempt}/3: ${err.message}`);
                 if (attempt < 3) await sleep(2000 * attempt);
               }
@@ -3166,6 +3205,20 @@ jobs:
             return false;
           }
 
+          // Panel thumbnails (≈300 px wide, q70) — with 200–300 sets the browser would otherwise decode
+          // thousands of 1620×2880 JPGs and freeze. Uses ImageMagick (present on GitHub runners); falls back to the full file.
+          const THUMB_DIR = '.thumbs';
+          let thumbTool = null;
+          for (const t of ['magick', 'convert']) { try { execSync(`${t} -version`, { stdio: 'ignore' }); thumbTool = t; break; } catch {} }
+          function makeThumb(item, frame) {
+            if (!thumbTool) return;
+            const dir = path.join(OUT_DIR, item.folder, THUMB_DIR); fs.mkdirSync(dir, { recursive: true });
+            const out = path.join(dir, frame.file);
+            execFile(thumbTool, [frame.localPath, '-resize', '300x540>', '-quality', '72', '-strip', out], { timeout: 30000 }, err => {
+              if (err) { log(`⚠️ thumbnail failed for ${item.folder}/${frame.file}: ${err.message.slice(0, 80)}`); return; }
+              frame.thumbReady = true; saveState();
+            });
+          }
           function itemStatusFromFrames(item) {
             const done = item.frames.filter(f => f.status === 'done').length;
             if (done === item.frames.length) return 'done';
@@ -3182,7 +3235,8 @@ jobs:
               await Promise.all(item.frames.map((fr, i) => (i > 0 && fr.status !== 'done') ? generateFrame(item, i) : Promise.resolve(true)));
             }
             item.status = itemStatusFromFrames(item);
-            if (item.status !== 'done') item.error = item.frames.filter(f => f.status === 'failed').map(f => `${f.file}: ${f.error}`).join(' · ');
+            if (state.quotaHit && item.status !== 'done' && item.frames.some(f => f.status === 'queued')) { item.status = 'queued'; item.error = 'waiting — Cloudinary generation limit'; }
+            else if (item.status !== 'done') item.error = item.frames.filter(f => f.status === 'failed').map(f => `${f.file}: ${f.error}`).join(' · ');
             lastActivity = Date.now(); saveState();
             if (item.status === 'done') {
               // Same order as the ringtone job: metadata FIRST (Gemini Web), then the Firebase record.
@@ -3291,6 +3345,7 @@ jobs:
             const hasMeta = !!(item.meta && item.meta.title && item.meta.tags && item.meta.category);
             if (state.settings.requireMetadata && !hasMeta && !opts.force) {
               if (state.metaWorker.error && !state.metaWorker.running) throw new Error(`${item.folder}: Gemini worker stopped — ${state.metaWorker.error}. Press Edit and type title / tags / category, or re-export GEMINI_SESSION and start the workflow again.`);
+              if (item.metaStatus === 'retry') throw new Error(`${item.folder}: metadata failed once (${item.metaError || 'Gemini error'}) — auto-retry at ${new Date(item.metaRetryAt).toTimeString().slice(0, 5)}. Wait, or press Edit.`);
               if (item.metaStatus === 'queued' || item.metaStatus === 'running') throw new Error(`${item.folder}: Gemini metadata is still being written — the record is sent as soon as it is ready. (Or press Edit and type title / tags / category yourself.)`);
               if (item.metaStatus === 'failed') throw new Error(`${item.folder}: metadata failed (${item.metaError || 'Gemini error'}). Press Redo or Edit it manually before distributing.`);
               throw new Error(`${item.folder}: no metadata yet — ${state.metaWorker.available ? 'press 🧠 Generate metadata or Edit it manually' : 'GEMINI_SESSION is missing, so type title / tags / category with Edit'}. Records without metadata are skipped by the Zedge bot.`);
@@ -3382,13 +3437,36 @@ jobs:
             const anchor = item.frames[0];
             if (anchor.status !== 'done' || !anchor.localPath || !fs.existsSync(anchor.localPath)) { item.metaStatus = 'failed'; item.metaError = 'anchor image missing'; saveState(); return false; }
             if (item.metaStatus === 'queued' || item.metaStatus === 'running') return true;
-            const job = { id: String(item.id), imagePath: anchor.localPath, kind: SET_FRAMES[item.type].contentType, folder: item.folder, queuedAt: Date.now() };
+            if (why !== 'retry') item.metaAttempts = 0;
+            const attempt = (item.metaAttempts || 0) + 1;
+            const job = { id: String(item.id), imagePath: anchor.localPath, kind: SET_FRAMES[item.type].contentType, folder: item.folder, queuedAt: Date.now(), attempt };
             fs.writeFileSync(path.join(META_JOBS, `${item.id}.json`), JSON.stringify(job));
-            item.metaStatus = 'queued'; item.metaError = '';
+            item.metaStatus = 'queued'; item.metaError = ''; item.metaAttempts = attempt; item.metaRetryAt = 0;
             mw.queued = metaJobCount();
-            log(`🧠 Metadata queued for ${item.folder} (${job.kind}) — ${why}`);
+            log(`🧠 Metadata queued for ${item.folder} (${job.kind}) — ${why}${attempt > 1 ? ` · attempt ${attempt}` : ''}`);
             saveState();
             ensureMetaWorker();
+            return true;
+          }
+          // Backoff between automatic retries of ONE item. Retries are also spaced globally: the worker runs
+          // jobs strictly one at a time and itself pauses / cools down after failures, so Gemini Web never
+          // gets a burst of retries. Session-expired errors are never retried (they cannot succeed).
+          const RETRY_DELAYS_MS = (process.env.STUDIO_RETRY_DELAYS || '').split(',').map(Number).filter(Boolean).length ? process.env.STUDIO_RETRY_DELAYS.split(',').map(Number) : [45000, 120000, 300000, 600000];
+          const retryTimers = new Map();
+          function scheduleMetaRetry(item, error) {
+            const max = Math.max(0, Math.min(6, parseInt(state.settings.metaAutoRetry, 10) || 0));
+            const attempt = item.metaAttempts || 1;
+            const fatal = /session|cookies|sign.?in|login|GEMINI_SESSION|image file not found|anchor image missing/i.test(error || '');
+            if (!max || attempt > max || fatal || state.finished || !state.metaWorker.available) return false;
+            let delay = RETRY_DELAYS_MS[Math.min(attempt - 1, RETRY_DELAYS_MS.length - 1)];
+            delay += Math.round(Math.random() * 15000);                                   // jitter — retries never line up
+            const mw = state.metaWorker;
+            if (mw.cooldownUntil > Date.now() + delay) delay = mw.cooldownUntil - Date.now();  // respect a global Gemini cool-down
+            item.metaStatus = 'retry'; item.metaRetryAt = Date.now() + delay; item.metaError = error;
+            mw.retries++;
+            log(`🔁 ${item.folder}: metadata failed (attempt ${attempt}/${max + 1}) — auto-retry in ${Math.round(delay / 1000)} s`);
+            clearTimeout(retryTimers.get(item.id));
+            retryTimers.set(item.id, setTimeout(() => { retryTimers.delete(item.id); if (state.items.includes(item) && item.metaStatus === 'retry') queueMetadata(item, 'retry'); }, delay));
             return true;
           }
           function ensureMetaWorker(why = 'jobs pending') {
@@ -3421,7 +3499,9 @@ jobs:
               if (code !== 0) {
                 mw.restarts++;
                 log(`🧠 Metadata worker exited with code ${code} — ${tail.slice(-2).join(' | ').slice(0, 220)}`);
-                if (pending && mw.restarts < 4) { log(`🧠 ${pending} job(s) still pending — restarting the worker in 20 s (${mw.restarts}/3)`); clearTimeout(metaRestartTimer); metaRestartTimer = setTimeout(() => ensureMetaWorker('restart'), 20000); }
+                const sessionDead = /Session FAILED|cookies are expired|GEMINI_SESSION/i.test(tail.join(' '));
+                if (pending && mw.restarts < 4 && !sessionDead) { const wait = [20000, 60000, 180000, 600000][mw.restarts - 1] || 600000; log(`🧠 ${pending} job(s) still pending — restarting the worker in ${Math.round(wait / 1000)} s (${mw.restarts}/3)`); clearTimeout(metaRestartTimer); metaRestartTimer = setTimeout(() => ensureMetaWorker('restart'), wait); }
+                else if (sessionDead) { mw.error = 'Gemini session expired / invalid — re-export GEMINI_SESSION'; for (const it of state.items) if (it.metaStatus === 'queued' || it.metaStatus === 'running' || it.metaStatus === 'retry') { it.metaStatus = 'failed'; it.metaError = mw.error; clearTimeout(retryTimers.get(it.id)); } }
                 else if (pending) { mw.error = mw.error || `worker crashed ${mw.restarts}× — fix GEMINI_SESSION (see console) or edit metadata manually`; for (const it of state.items) if (it.metaStatus === 'queued' || it.metaStatus === 'running') { it.metaStatus = 'failed'; it.metaError = mw.error; } }
               } else { log('🧠 Metadata worker stopped'); if (pending) { clearTimeout(metaRestartTimer); metaRestartTimer = setTimeout(() => ensureMetaWorker('jobs pending'), 3000); } }
               saveState();
@@ -3470,15 +3550,22 @@ jobs:
             const item = state.items.find(i => String(i.id) === String(r.id));
             const mw = state.metaWorker;
             if (!item) return;
+            if (item.metaStatus === 'manual') { log(`ℹ️ ${item.folder}: Gemini result ignored — manual metadata wins`); return; }
             if (r.ok) {
-              item.meta = { title: String(r.title || '').trim(), tags: String(r.tags || '').trim(), category: VALID_IMG_CATS.includes(String(r.category || '').toUpperCase()) ? String(r.category).toUpperCase() : 'OTHER', description: String(r.description || '').trim(), policyCheck: r.policyCheck === 'held' ? 'held' : 'passed', policyFlag: r.policyFlag || '', generatedAt: r.finishedAt || Date.now(), source: 'gemini-web' };
+              const cat0 = VALID_IMG_CATS.includes(String(r.category || '').toUpperCase()) ? String(r.category).toUpperCase() : 'OTHER';
+              const tags0 = stripCategoryTags(String(r.tags || '').toLowerCase().split(/[,\s]+/).filter(Boolean), cat0).join(', ');
+              item.meta = { title: String(r.title || '').trim(), tags: tags0, category: VALID_IMG_CATS.includes(String(r.category || '').toUpperCase()) ? String(r.category).toUpperCase() : 'OTHER', description: String(r.description || '').trim(), policyCheck: r.policyCheck === 'held' ? 'held' : 'passed', policyFlag: r.policyFlag || '', generatedAt: r.finishedAt || Date.now(), source: 'gemini-web' };
               if (!item.meta.title) { item.meta = null; item.metaStatus = 'failed'; item.metaError = 'Gemini returned an empty title'; mw.failed++; log(`❌ ${item.folder}: Gemini returned no title — Redo or edit manually`); }
               else {
-                item.metaStatus = item.meta.policyCheck === 'held' ? 'held' : 'done'; item.metaError = '';
+                item.metaStatus = item.meta.policyCheck === 'held' ? 'held' : 'done'; item.metaError = ''; mw.restarts = 0;
                 if (item.metaStatus === 'held') mw.held++; else mw.done++;
                 log(item.metaStatus === 'held' ? `🛑 ${item.folder}: policy hold — ${item.meta.policyFlag}` : `✅ ${item.folder}: metadata ready — "${item.meta.title}" · ${item.meta.category} · ${item.meta.tags.split(',').length} tags`);
               }
-            } else { item.meta = null; item.metaStatus = 'failed'; item.metaError = r.error || 'unknown error'; mw.failed++; }
+            } else {
+              item.meta = null; mw.failed++;
+              if ((r.consecutiveFailures || 0) >= 3) mw.cooldownUntil = Date.now() + Math.min(180000, 60000 * (r.consecutiveFailures - 2));
+              if (!scheduleMetaRetry(item, r.error || 'unknown error')) { item.metaStatus = 'failed'; item.metaError = r.error || 'unknown error'; log(`❌ ${item.folder}: metadata failed after ${item.metaAttempts || 1} attempt(s) — ${item.metaError}. Press Redo or Edit.`); }
+            }
             mw.queued = metaJobCount();
             lastActivity = Date.now(); saveState();
             if (item.distributed.length && item.meta) patchDistributed(item, 'updated').catch(e => log(`❌ ${item.folder}: ${e.message}`));
@@ -3494,24 +3581,34 @@ jobs:
           }, 2000);
 
           // Manual metadata from the panel (Edit). Same limits as the Gemini prompt / zedgeEnforce: title ≤25, 2–10 tags, category from the Zedge list.
+          // Zedge: the category name (whole, its words, singular/plural) must never be one of the tags.
+          function stripCategoryTags(tags, category) {
+            const words = String(category || '').toLowerCase().split(/[^a-z]+/).filter(w => w.length > 1 && w !== 'n' && w !== 'and');
+            const full = String(category || '').toLowerCase().replace(/[^a-z]/g, '');
+            const stem = w => String(w).replace(/(ies|es|s)$/, '');
+            return tags.filter(t => !(t === full || stem(t) === stem(full) || words.some(c => c === t || stem(c) === stem(t))));
+          }
           function setManualMeta(item, b) {
             const title = String(b.title || '').replace(/\s+/g, ' ').trim();
             if (title.length < 3 || title.length > 25) throw new Error('Title must be 3–25 characters (Zedge limit).');
-            const tags = [...new Set(String(b.tags || '').toLowerCase().split(/[,\s]+/).map(t => t.trim()).filter(t => /^[a-z0-9-]{2,20}$/.test(t)))].slice(0, 10);
-            if (tags.length < 2) throw new Error('Give at least 2 tags (letters/numbers, comma separated).');
             const category = String(b.category || '').toUpperCase().trim();
             if (!VALID_IMG_CATS.includes(category)) throw new Error('Pick a category from the list.');
+            const rawTags = [...new Set(String(b.tags || '').toLowerCase().split(/[,\s]+/).map(t => t.trim()).filter(t => /^[a-z0-9-]{2,20}$/.test(t)))];
+            const tags = stripCategoryTags(rawTags, category).slice(0, 10);
+            if (rawTags.length !== tags.length + Math.max(0, rawTags.length - 10)) throw new Error(`Tags must not contain the category name (${category.toLowerCase().replace(/_/g, ' ')}) — Zedge rule. Remove it.`);
+            if (tags.length < 2) throw new Error('Give at least 2 tags (letters/numbers, comma separated).');
             const description = String(b.description || '').replace(/\s+/g, ' ').trim().slice(0, 120);
             if (/[#@]|https?:|www\./i.test(title + ' ' + description + ' ' + tags.join(' '))) throw new Error('No links, hashtags or @handles (Zedge policy).');
             item.meta = { title, tags: tags.join(', '), category, description, policyCheck: 'passed', policyFlag: '', generatedAt: Date.now(), source: 'manual' };
-            item.metaStatus = 'manual'; item.metaError = ''; item.autoHeldNoted = false;
+            item.metaStatus = 'manual'; item.metaError = ''; item.autoHeldNoted = false; clearTimeout(retryTimers.get(item.id)); retryTimers.delete(item.id);
             try { fs.unlinkSync(path.join(META_JOBS, `${item.id}.json`)); } catch {}
             log(`📝 ${item.folder}: manual metadata saved — "${title}" · ${category}`);
             saveState();
           }
           async function redoMetadata(item) {
             if (!state.metaWorker.available) throw new Error('Gemini metadata is unavailable (GEMINI_SESSION missing) — edit it manually instead.');
-            item.meta = null; item.metaStatus = ''; item.metaError = ''; item.autoHeldNoted = false;
+            clearTimeout(retryTimers.get(item.id)); retryTimers.delete(item.id);
+            item.meta = null; item.metaStatus = ''; item.metaError = ''; item.autoHeldNoted = false; item.metaAttempts = 0;
             queueMetadata(item, 'redo');
             return 1;
           }
@@ -3562,7 +3659,7 @@ jobs:
             writeExports();
             const zipPath = '/tmp/zedge_upload.zip';
             try { fs.unlinkSync(zipPath); } catch {}
-            execSync(`cd "${OUT_DIR}" && zip -q -r "${zipPath}" . -x "studio_state.json"`, { stdio: 'pipe' });
+            execSync(`cd "${OUT_DIR}" && zip -q -r "${zipPath}" . -x "studio_state.json" "*/.thumbs/*" "distribution_ledger.json"`, { stdio: 'pipe' });
             return zipPath;
           }
 
@@ -3602,7 +3699,16 @@ jobs:
           }, 10000);
 
           // ─── HTTP ──────────────────────────────────────────────────────────────────
-          const json = (res, code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(obj)); };
+          const json = (res, code, obj, req) => {
+            const body = JSON.stringify(obj);
+            // gzip large payloads (the 300-item state is ~500 KB raw, ~40 KB gzipped) — matters on mobile data
+            if (req && body.length > 4096 && /\bgzip\b/.test(req.headers['accept-encoding'] || '')) {
+              const gz = zlib.gzipSync(Buffer.from(body));
+              res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Encoding': 'gzip', 'Content-Length': gz.length });
+              return res.end(gz);
+            }
+            res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(body);
+          };
           const readBody = req => new Promise((resolve, reject) => { let d = ''; req.on('data', c => { d += c; if (d.length > 5e6) req.destroy(); }); req.on('end', () => { try { resolve(d ? JSON.parse(d) : {}); } catch (e) { reject(new Error('invalid JSON body')); } }); req.on('error', reject); });
           function authed(req, url) {
             const q = url.searchParams.get('k');
@@ -3613,7 +3719,8 @@ jobs:
           function publicState() {
             return {
               ...state,
-              items: state.items.map(i => ({ ...i, frames: i.frames.map(f => ({ ...f, localPath: undefined, thumb: f.status === 'done' ? `/files/${encodeURIComponent(i.folder)}/${encodeURIComponent(f.file)}` : '' })) })),
+              log: state.log.slice(-150),
+              items: state.items.map(i => ({ ...i, frames: i.frames.map(f => ({ ...f, localPath: undefined, url: undefined, thumb: f.status === 'done' ? `/files/${encodeURIComponent(i.folder)}/${f.thumbReady ? THUMB_DIR + '/' : ''}${encodeURIComponent(f.file)}` : '', full: f.status === 'done' ? `/files/${encodeURIComponent(i.folder)}/${encodeURIComponent(f.file)}` : '' })) })),
               creds: { ok: hasCreds(), cloud_name: creds.cloud_name, api_key: creds.api_key ? creds.api_key.slice(0, 4) + '…' : '' },
               models: TEXT_MODELS, editModels: EDIT_MODELS, ratios: Object.keys(RATIOS), accounts: [...Object.keys(FIREBASE_DB_MAP), SPREAD], spreadCounts: spreadCounts().counts,
               startedAt, deadline, now: Date.now(), inFlight,
@@ -3627,7 +3734,9 @@ jobs:
                 metaReady: state.items.reduce((n, i) => n + i.distributed.filter(d => d.meta && d.meta.title).length, 0),
                 metaItems: state.items.filter(i => i.meta && i.meta.title).length,
                 metaHeld: state.items.filter(i => i.meta && i.meta.policyCheck === 'held').length,
-                metaPending: state.items.filter(i => i.metaStatus === 'queued' || i.metaStatus === 'running').length,
+                metaPending: state.items.filter(i => i.metaStatus === 'queued' || i.metaStatus === 'running' || i.metaStatus === 'retry').length,
+                metaRetry: state.items.filter(i => i.metaStatus === 'retry').length,
+                metaFailed: state.items.filter(i => i.metaStatus === 'failed').length,
                 metaNeeded: state.items.filter(i => i.status === 'done' && !(i.meta && i.meta.title)).length
               },
               categories: VALID_IMG_CATS,
@@ -3701,7 +3810,10 @@ jobs:
                 res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Cache-Control': 'private, max-age=3600' });
                 return fs.createReadStream(fp).pipe(res);
               }
-              if (p === '/api/state') return json(res, 200, publicState());
+              if (p === '/api/state') {
+                if (url.searchParams.get('v') === String(stateVersion)) return json(res, 200, { unchanged: true, version: stateVersion, now: Date.now() });
+                return json(res, 200, { ...publicState(), version: stateVersion }, req);
+              }
               if (p === '/api/zip') {
                 const zp = buildZip();
                 res.writeHead(200, { 'Content-Type': 'application/zip', 'Content-Disposition': 'attachment; filename="zedge_upload.zip"', 'Content-Length': fs.statSync(zp).size });
@@ -3726,6 +3838,7 @@ jobs:
                 if (typeof s.queuePath === 'string' && /^[A-Za-z0-9_\/-]{1,80}$/.test(s.queuePath.trim())) state.settings.queuePath = s.queuePath.trim();
                 if (typeof s.autoDistribute === 'boolean') state.settings.autoDistribute = s.autoDistribute;
                 if (typeof s.requireMetadata === 'boolean') state.settings.requireMetadata = s.requireMetadata;
+                if (s.metaAutoRetry !== undefined) state.settings.metaAutoRetry = Math.max(0, Math.min(6, parseInt(s.metaAutoRetry, 10) || 0));
                 if (typeof s.runMetadata === 'boolean') state.settings.runMetadata = s.runMetadata;
                 if (typeof s.autoMetadata === 'boolean') state.settings.autoMetadata = s.autoMetadata;
                 if (s.autoFinishMinutes !== undefined) state.settings.autoFinishMinutes = Math.max(0, Math.min(300, parseInt(s.autoFinishMinutes, 10) || 0));
@@ -3734,6 +3847,7 @@ jobs:
                   if (!/^[A-Za-z0-9_-]{2,100}$/.test(String(c.cloud_name).trim())) throw new Error('Cloud name contains unsupported characters.');
                   creds.cloud_name = String(c.cloud_name).trim(); creds.api_key = String(c.api_key).trim(); creds.api_secret = String(c.api_secret).trim();
                   log('🔑 Cloudinary credentials updated from panel');
+                  if (state.quotaHit) { state.quotaHit = ''; state.paused = false; log('▶️ New Cloudinary keys — queue resumed'); }
                 }
                 saveState(); pump();
                 if (state.settings.autoDistribute) state.items.forEach(maybeAutoDistribute);
@@ -3779,7 +3893,7 @@ jobs:
                 saveState();
                 return json(res, 200, { ok: true });
               }
-              if (p === '/api/pause') { state.paused = !!body.paused; log(state.paused ? '⏸ Queue paused' : '▶️ Queue resumed'); saveState(); pump(); return json(res, 200, { ok: true, paused: state.paused }); }
+              if (p === '/api/pause') { state.paused = !!body.paused; if (!state.paused) state.quotaHit = ''; log(state.paused ? '⏸ Queue paused' : '▶️ Queue resumed'); saveState(); pump(); return json(res, 200, { ok: true, paused: state.paused }); }
               if (p === '/api/distribute') {
                 const target = String(body.target || state.settings.targetAccount).toLowerCase();
                 if (target !== SPREAD) targetDbs(target); else pickSpreadAccount(); // validate
@@ -3798,7 +3912,7 @@ jobs:
               }
               if (p === '/api/meta/run') {
                 if (!state.metaWorker.available) throw new Error(GEMINI_AVAILABLE ? 'image_metadata.mjs not found on the runner' : 'GEMINI_SESSION secret / gemini_session input is missing — type metadata manually with Edit');
-                let n = 0; for (const it of state.items) if (it.status === 'done' && !(it.meta && it.meta.title) && it.metaStatus !== 'queued' && it.metaStatus !== 'running') { if (queueMetadata(it, 'panel')) n++; }
+                let n = 0; for (const it of state.items) if (it.status === 'done' && !(it.meta && it.meta.title) && it.metaStatus !== 'queued' && it.metaStatus !== 'running') { clearTimeout(retryTimers.get(it.id)); retryTimers.delete(it.id); it.metaAttempts = 0; if (queueMetadata(it, 'panel')) n++; }
                 if (!n) { state.metaWorker.restarts = 0; ensureMetaWorker('panel'); }
                 return json(res, 200, { ok: true, queued: n });
               }
@@ -4031,6 +4145,12 @@ jobs:
           .btn.hold{background:rgba(255,107,107,.14);color:#ffb3b3;border:1px solid rgba(255,107,107,.35)}
           .acctsum button.meta i{background:var(--violet)}.acctsum button.held i{background:var(--err)}
           @media(max-width:640px){.medit{grid-template-columns:1fr}}
+          .pager{display:flex;align-items:center;gap:8px;padding:0 18px 14px;flex-wrap:wrap;color:var(--muted);font-size:12.5px}
+          .pager button{border:1px solid var(--line);background:rgba(255,255,255,.04);color:var(--txt);border-radius:7px;min-width:32px;height:30px;padding:0 10px;font:inherit;font-size:12.5px;cursor:pointer}
+          .pager button:disabled{opacity:.35;cursor:default}.pager select{width:auto;min-height:30px;height:30px;padding:0 28px 0 10px;font-size:12.5px;border-radius:7px;background-position:calc(100% - 14px) 50%,calc(100% - 9px) 50%}
+          .pager .sp{flex:1}.pager b{color:var(--txt)}
+          .item{content-visibility:auto;contain-intrinsic-size:420px}
+          .ms.retry{background:rgba(245,182,61,.15);color:#ffd27a}
           </style></head><body>
           <svg width="0" height="0" style="position:absolute"><defs><linearGradient id="g1" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#6d8cff"/><stop offset="1" stop-color="#38d6ff"/></linearGradient></defs></svg>
           <header class="top"><div class="in">
@@ -4106,6 +4226,7 @@ jobs:
              <div style="margin-top:14px">
               <label class="sw"><span class="t">Auto‑distribute<small>Send each item as soon as all of its frames are done</small></span><input type="checkbox" id="autoDistribute"><span class="k"></span></label>
               <label class="sw"><span class="t">Gemini metadata before distribute<small>As soon as a set / image is rendered, Gemini Web writes title · tags · category · description + Zedge policy check (same script as <code>metadata</code> mode)</small></span><input type="checkbox" id="autoMetadata"><span class="k"></span></label>
+              <div class="g2" style="margin-bottom:10px"><div><label class="l">Auto‑retry failed metadata</label><select id="metaAutoRetry"><option value="0">off</option><option value="2">2 retries</option><option value="4">4 retries (45 s → 2 → 5 → 10 min)</option><option value="6">6 retries</option></select></div><div><label class="l">&nbsp;</label><div style="font-size:12px;color:var(--muted);line-height:1.45">Retries are spaced with growing back‑off + jitter; the Gemini worker runs one image at a time and cools down after 3 failures in a row — no bursts, no time‑outs.</div></div></div>
               <label class="sw"><span class="t">Require metadata to distribute<small>Records are pushed to Firebase <b>with</b> metadata, exactly like the ringtone job — the Zedge bot never sees a “metadata missing” file. Turn off only if you want the old behaviour (push first, patch later).</small></span><input type="checkbox" id="requireMetadata"><span class="k"></span></label>
               <label class="sw"><span class="t">Final metadata pass after finish<small>Safety net: after the session the Firebase scan runs once for anything still missing title / tags / category</small></span><input type="checkbox" id="runMetadata"><span class="k"></span></label>
              </div>
@@ -4134,7 +4255,9 @@ jobs:
            <div class="acctsum" style="padding-top:8px"><span class="mw" id="mw"><i></i><span id="mwTxt">metadata worker idle</span></span><button class="btn sec sm" id="metaRunBtn" title="Queue every finished item that still has no metadata for Gemini Web">🧠 Generate metadata <b id="metaNeed" style="margin-left:4px"></b></button><button class="btn sec sm icon" id="metaRefreshBtn" title="Re-read record status from Firebase"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11A8 8 0 1 0 6.7 16.7"/><path d="M20 5v6h-6"/></svg></button></div>
            <div class="done-banner" id="finishedBox"></div>
            <div class="banner" id="credBanner">⚠ Add your Cloudinary keys in <b>Keys</b> — queued items start as soon as they are saved.</div>
+           <div class="banner" id="quotaBanner">⛔ <b>Cloudinary generation limit exceeded</b> (MG_00602) — this Cloudinary account has used up its AI image-generation quota. The queue is paused, nothing is marked failed. Upgrade the plan at <a href="https://console.cloudinary.com/app/image/generation/plans" target="_blank" style="color:inherit">console.cloudinary.com → Image Generation → Plans</a>, or enter the keys of another Cloudinary cloud in <b>Keys</b>; then press <b>Resume</b>.</div>
            <div class="grid" id="items"></div>
+           <div class="pager" id="pager"></div>
            <div class="empty" id="empty"><div class="phones"><i></i><i></i><i></i><i></i></div><h4>Nothing in the collection yet</h4><p>Paste prompts on the left — singles, 24‑hour, dual or battery sets — and watch them render here frame by frame.</p></div>
           </section>
           </main>
@@ -4148,13 +4271,13 @@ jobs:
           const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
           const RE='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11A8 8 0 1 0 6.7 16.7"/><path d="M20 5v6h-6"/></svg>';
           const PEN='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>';
-          let S=null,inited=false,filter='all',openPrompts=new Set(),editId=null;
+          let S=null,inited=false,filter='all',openPrompts=new Set(),editId=null,page=0,pageSize=+(localStorage.getItem('pageSize')||24),ver=null;const cardSig=new Map();
           function toast(m,k){const t=document.createElement('div');t.className='toast'+(k?' '+k:'');t.textContent=m;$('#toasts').appendChild(t);setTimeout(()=>{t.style.opacity=0;t.style.transition='.3s';setTimeout(()=>t.remove(),300)},3200)}
           async function api(p,b){const r=await fetch(p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})});const d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.error||('HTTP '+r.status));return d}
           const fmtLeft=ms=>{const h=Math.floor(ms/3600000),m=Math.floor(ms%3600000/60000);return h?\`\${h}h \${String(m).padStart(2,'0')}m\`:\`\${m}m\`};
           const ring=(el,frac)=>{el.style.strokeDashoffset=(94.2*(1-Math.max(0,Math.min(1,frac)))).toFixed(1)};
           const typeCls=t=>t==='24-HOUR'?'T24':t;
-          const ACCTS=['zedge_1','zedge_2','zedge_3','zedge_4'];const acls=a=>'z'+String(a).replace(/\\D/g,'');
+          const accts=()=>S?S.accounts.filter(a=>a!=='spread'):[];const acls=a=>'z'+String(a).replace(/\\D/g,'');
           const fmtT=ms=>{const d=new Date(ms);return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0')};
           const targetsOf=t=>[t];
           function sentRow(i){
@@ -4166,12 +4289,12 @@ jobs:
            const failed=i.distributeError&&i.distributeStatus!=='running'?i.distributeError.split(' · ').map(x=>{const m=x.match(/^(zedge_\\d)/);return m&&!sentTo.has(m[1])?\`<span class="acct err" title="\${esc(x)}">\${esc(m[1])}<small>failed</small></span>\`:''}).join(''):'';
            return \`<div class="sent"><span class="lbl">Sent to</span>\${badges}\${pending}\${failed}</div>\`}
           const tagList=t=>Array.isArray(t)?t:String(t||'').split(/[,;]+/).map(x=>x.trim()).filter(Boolean);
-          const MS={queued:'queued for Gemini',running:'Gemini is writing…',done:'✓ Gemini Web',manual:'manual ✓',held:'🛑 policy hold',failed:'✗ failed'};
+          const MS={queued:'queued for Gemini',running:'Gemini is writing…',retry:'auto‑retry scheduled',done:'✓ Gemini Web',manual:'manual ✓',held:'🛑 policy hold',failed:'✗ failed'};
           function metaBlock(i){
            if(i.status!=='done') return '';
            const mw=S.metaWorker,m=i.meta,st=i.metaStatus||(m?'done':'none');
            const chip=\`<span class="ms \${st}">\${st==='running'||st==='queued'?'<i></i>':''}\${MS[st]||'no metadata'}</span>\`;
-           const canRedo=mw.available&&st!=='queued'&&st!=='running';
+           const canRedo=mw.available&&st!=='queued'&&st!=='running'&&st!=='retry';
            const head=\`<div class="mh">🧠 Zedge metadata \${chip}<span class="sp"></span>\${editId===i.id?'':\`<button class="btn sec sm" onclick="editMeta(\${i.id})" title="Type / fix title, tags, category yourself">\${PEN} Edit</button>\`}\${canRedo?\`<button class="btn sec sm" onclick="redoMeta(\${i.id})" title="Ask Gemini Web again\${i.distributed.length?' and patch every sent record':''}">\${RE} Redo</button>\`:''}</div>\`;
            if(editId===i.id){const f=m||{title:i.metadata.title,tags:(i.metadata.tags||[]).join(', '),category:i.metadata.category,description:i.metadata.description};
             return \`<div class="metab">\${head}<form class="medit" onsubmit="saveMeta(event,\${i.id})">
@@ -4184,7 +4307,8 @@ jobs:
            if(m&&m.title) body=\`<div class="mbody"><div class="t">\${esc(m.title)}<span class="cat">\${esc(m.category)}</span></div>\${m.description?\`<div class="d">\${esc(m.description)}</div>\`:''}<div class="tags">\${tagList(m.tags).map(t=>\`<span>\${esc(t)}</span>\`).join('')}</div>\${m.policyFlag?\`<div class="flag">🛑 Zedge policy: \${esc(m.policyFlag)} — pushed as <b>status failed / held</b>; fix with Edit (re-queues) or Redo.</div>\`:''}</div>\`;
            else if(st==='queued') body=\`<div class="mbody"><div class="wait"><i></i>\${mw.running&&mw.ready?'queued — Gemini is busy with another image':mw.running?'waiting — Gemini Web is opening…':mw.error?\`worker stopped: \${esc(mw.error)} · use Edit\`:'waiting for the metadata worker'}</div></div>\`;
            else if(st==='running') body=\`<div class="mbody"><div class="wait"><i></i>Gemini Web is looking at this image and writing title · tags · category…</div></div>\`;
-           else if(st==='failed') body=\`<div class="mbody"><div class="flag">✗ \${esc(i.metaError||'metadata failed')} — press Redo or Edit.</div></div>\`;
+           else if(st==='retry') body=\`<div class="mbody"><div class="wait"><i style="background:var(--warn)"></i>attempt \${i.metaAttempts||1} failed (\${esc(String(i.metaError||'').slice(0,90))}) — Gemini will retry automatically at <b>\${fmtT(i.metaRetryAt)}</b></div></div>\`;
+           else if(st==='failed') body=\`<div class="mbody"><div class="flag">✗ \${esc(i.metaError||'metadata failed')}\${i.metaAttempts>1?\` (after \${i.metaAttempts} attempts)\`:''} — press Redo or Edit.</div></div>\`;
            else body=\`<div class="mbody"><div class="wait">\${!mw.available?'GEMINI_SESSION missing — type the metadata with Edit (records without it are skipped by the Zedge bot).':S.settings.autoMetadata?'no metadata yet — press 🧠 Generate metadata or Edit':'auto metadata is off — press 🧠 Generate metadata or Edit'}</div></div>\`;
            return \`<div class="metab">\${head}\${body}</div>\`}
           function distBtn(i){
@@ -4211,14 +4335,14 @@ jobs:
            $('#model').innerHTML=S.models.map(m=>\`<option\${m===s.model?' selected':''}>\${m}</option>\`).join('');
            $('#ratio').innerHTML=S.ratios.map(r=>\`<option\${r===s.ratio?' selected':''}>\${r}</option>\`).join('');
            $('#target').innerHTML=S.accounts.map(a=>\`<option value="\${a}"\${a===s.targetAccount?' selected':''}>\${a==='spread'?'spread — each item to a different account':a}</option>\`).join('');
-           $('#spreadPool').innerHTML=ACCTS.map(a=>\`<label class="chip" style="cursor:pointer;display:inline-flex;gap:6px;align-items:center"><input type="checkbox" class="sp" value="\${a}"\${(s.spreadPool||ACCTS).includes(a)?' checked':''}>\${a} <b style="color:var(--faint)">\${(S.spreadCounts||{})[a]??0}</b></label>\`).join('');$('#spreadBox').style.display=$('#target').value==='spread'?'':'none';
+           $('#spreadPool').innerHTML=accts().map(a=>\`<label class="chip" style="cursor:pointer;display:inline-flex;gap:6px;align-items:center"><input type="checkbox" class="sp" value="\${a}"\${(s.spreadPool||accts()).includes(a)?' checked':''}>\${a} <b style="color:var(--faint)">\${(S.spreadCounts||{})[a]??0}</b></label>\`).join('');$('#spreadBox').style.display=$('#target').value==='spread'?'':'none';
            $('#res').value=s.res;$('#concurrency').value=s.concurrency;$('#boost').value=s.boost;$('#display').value=s.display;$('#strength').value=s.strength;$('#upscale').checked=s.upscale;
-           $('#queuePath').value=s.queuePath;$('#autoDistribute').checked=s.autoDistribute;$('#requireMetadata').checked=s.requireMetadata;$('#runMetadata').checked=s.runMetadata;$('#autoMetadata').checked=s.autoMetadata;$('#autoFinish').value=s.autoFinishMinutes;$('#c_cloud').value=S.creds.cloud_name||''}
+           $('#queuePath').value=s.queuePath;$('#autoDistribute').checked=s.autoDistribute;$('#requireMetadata').checked=s.requireMetadata;$('#metaAutoRetry').value=String(s.metaAutoRetry??4);$('#runMetadata').checked=s.runMetadata;$('#autoMetadata').checked=s.autoMetadata;$('#autoFinish').value=s.autoFinishMinutes;$('#c_cloud').value=S.creds.cloud_name||''}
 
           function itemCard(i){
            const done=i.frames.filter(f=>f.status==='done').length,n=i.frames.length;
            const shape=i.type==='SINGLE'&&i.settings.ratio!=='9:16'?(i.settings.ratio==='1:1'?' sq':(i.settings.ratio==='16:9'||i.settings.ratio==='4:3')?' land':''):'';
-           const frames=i.frames.map((f,k)=>\`<div class="fr \${f.status}\${shape}" title="\${esc(f.name)}\${f.error?' — '+esc(f.error):''}">\${f.status==='done'?\`<img src="\${f.thumb}" loading="lazy" alt="\${esc(f.file)}" onclick="lb('\${f.thumb}','\${esc(i.folder)} · \${esc(f.file)}')">\`:\`<div class="ph">\${f.status==='running'?'rendering…':f.status==='failed'?'failed':'queued'}</div>\`}\${i.status!=='running'&&!i.distributed.length?\`<button class="re" title="Regenerate \${esc(f.name)}" onclick="retry(\${i.id},\${k})">\${RE}</button>\`:''}<div class="cap">\${esc(f.name)}</div></div>\`).join('');
+           const frames=i.frames.map((f,k)=>\`<div class="fr \${f.status}\${shape}" title="\${esc(f.name)}\${f.error?' — '+esc(f.error):''}">\${f.status==='done'?\`<img src="\${f.thumb}" loading="lazy" alt="\${esc(f.file)}" onclick="lb('\${f.full||f.thumb}','\${esc(i.folder)} · \${esc(f.file)}')">\`:\`<div class="ph">\${f.status==='running'?'rendering…':f.status==='failed'?'failed':'queued'}</div>\`}\${i.status!=='running'&&!i.distributed.length?\`<button class="re" title="Regenerate \${esc(f.name)}" onclick="retry(\${i.id},\${k})">\${RE}</button>\`:''}<div class="cap">\${esc(f.name)}</div></div>\`).join('');
            const dist=i.distributed.length?\`<span class="st dist">🔒 \${esc(i.distributed[0].dbName)} only</span>\`:'';const mst=i.status==='done'&&i.meta&&i.meta.title?\`<span class="st dist" style="color:\${i.meta.policyCheck==='held'?'#ffb3b3':'#9ef0c6'}">\${i.meta.policyCheck==='held'?'🛑 held':'🧠 meta ✓'}</span>\`:'';
            const busyDist='';
            return \`<article class="item \${i.status}" data-id="\${i.id}">
@@ -4242,11 +4366,12 @@ jobs:
            $('#bar').style.width=(t.frames?t.framesDone/t.frames*100:0)+'%';
            $('#tMeta').textContent=\`\${t.metaItems} / \${t.itemsDone}\`;ring($('#rMeta'),t.itemsDone?t.metaItems/t.itemsDone:0);
            const mw=s.metaWorker,mwEl=$('#mw');const busy=s.items.some(i=>i.metaStatus==='running');mwEl.className='mw '+(mw.error&&!mw.running?'err':mw.running&&busy?'run':mw.running&&mw.ready?'ok':mw.running?'run':mw.available?'':'off');
-           $('#mwTxt').innerHTML=!mw.available?\`<b>Gemini metadata unavailable</b> · \${s.geminiAvailable?'image_metadata.mjs missing':'GEMINI_SESSION not set'} — use Edit on each card\`:mw.running&&!mw.ready?\`<b>Gemini Web</b> <span class="cur">· \${esc(mw.current||'opening…')}</span>\`:mw.running?\`<b>Gemini Web \${busy?'writing':'ready'}</b> <span class="cur">· \${esc(mw.current||'idle')}</span>\${t.metaPending?\` · \${t.metaPending} pending\`:''} · ✅ \${mw.done} 🛑 \${mw.held} ❌ \${mw.failed}\`:mw.error?\`<b>Gemini worker stopped</b> · \${esc(mw.error)}\`:\`<b>Gemini worker idle</b>\${mw.lastExit?\` · exit \${mw.lastExit.code} at \${fmtT(mw.lastExit.at)}\`:''} · ✅ \${mw.done} 🛑 \${mw.held} ❌ \${mw.failed}\`;
+           $('#mwTxt').innerHTML=!mw.available?\`<b>Gemini metadata unavailable</b> · \${s.geminiAvailable?'image_metadata.mjs missing':'GEMINI_SESSION not set'} — use Edit on each card\`:mw.running&&!mw.ready?\`<b>Gemini Web</b> <span class="cur">· \${esc(mw.current||'opening…')}</span>\`:mw.running?\`<b>Gemini Web \${busy?'writing':'ready'}</b> <span class="cur">· \${esc(mw.current||'idle')}</span>\${t.metaPending?\` · \${t.metaPending} pending\`:''}\${t.metaRetry?\` · 🔁 \${t.metaRetry} retrying\`:''}\${mw.cooldownUntil>s.now?\` · 🧊 cool‑down until \${fmtT(mw.cooldownUntil)}\`:''} · ✅ \${mw.done} 🛑 \${mw.held} ❌ \${mw.failed}\`:mw.error?\`<b>Gemini worker stopped</b> · \${esc(mw.error)}\`:\`<b>Gemini worker idle</b>\${mw.lastExit?\` · exit \${mw.lastExit.code} at \${fmtT(mw.lastExit.at)}\`:''} · ✅ \${mw.done} 🛑 \${mw.held} ❌ \${mw.failed}\`;
            $('#metaRunBtn').disabled=!mw.available||(!t.metaNeeded&&mw.running);$('#metaNeed').textContent=t.metaNeeded?t.metaNeeded:'';
            $('#credPill').classList.toggle('off',!s.creds.ok);$('#credTxt').textContent=s.creds.ok?s.creds.cloud_name:'no credentials';
            $('#credHint').textContent=s.creds.ok?\`Connected to cloud "\${s.creds.cloud_name}" (key \${s.creds.api_key}). Fill all three fields to replace.\`:'Add cloud name, API key and API secret from your Cloudinary console.';
            $('#credBanner').classList.toggle('on',!s.creds.ok&&s.items.some(i=>i.status==='queued'));
+           $('#quotaBanner').classList.toggle('on',!!s.quotaHit);
            $('#pauseBtn').querySelector('span').textContent=s.paused?'Resume':'Pause';$('#pauseBtn').classList.toggle('warn',s.paused);
            const running=s.items.filter(i=>i.status==='running').length,queued=s.items.filter(i=>i.status==='queued').length,failed=s.items.filter(i=>i.status==='failed'||i.status==='partial').length;
            const st=$('#status');st.className='status '+(s.finished?'done':running?'run':s.paused&&queued?'paused':t.items&&!queued?'done':'');
@@ -4258,20 +4383,30 @@ jobs:
            if(s.items.length&&!list.length){$('#empty').style.display='';$('#empty').querySelector('h4').textContent='Nothing matches this filter';$('#empty').querySelector('p').textContent='Try another filter above.'}
            else if(!s.items.length){$('#empty').querySelector('h4').textContent='Nothing in the collection yet';$('#empty').querySelector('p').textContent='Paste prompts on the left — singles, 24‑hour, dual or battery sets — and watch them render here frame by frame.'}
            if(editId!==null&&!s.items.some(i=>i.id===editId))editId=null;
-           if(editId===null){$('#items').innerHTML=list.map(itemCard).join('')}else{list.forEach(i=>{const el=$('#items').querySelector(\`[data-id="\${i.id}"]\`);if(!el){$('#items').insertAdjacentHTML('beforeend',itemCard(i));return}if(i.id===editId&&el.querySelector('.medit'))return;el.outerHTML=itemCard(i)})}
-           $('#acctsum').innerHTML='<span class="lbl">Sent per account</span>'+ACCTS.map(a=>{const n=s.items.filter(i=>i.distributed.some(d=>d.dbName===a)).length;return \`<button class="\${acls(a)} \${filter==='acct:'+a?'on':''} \${n?'':'none'}" onclick="acctFilter('\${a}')"><i></i>\${a} <b>\${n}</b></button>\`}).join('')+(s.items.some(i=>i.status==='done'&&!i.distributed.length)?\`<button class="\${filter==='unsent'?'on':''}" onclick="acctFilter('unsent')">not sent <b>\${s.items.filter(i=>i.status==='done'&&!i.distributed.length).length}</b></button>\`:'')+(t.metaNeeded?\`<button class="meta \${filter==='nometa'?'on':''}" onclick="acctFilter('nometa')"><i></i>needs metadata <b>\${t.metaNeeded}</b></button>\`:'')+(t.metaHeld?\`<button class="held \${filter==='held'?'on':''}" onclick="acctFilter('held')"><i></i>policy hold <b>\${t.metaHeld}</b></button>\`:'');
+           /* pagination — 200–300 sets would otherwise mean thousands of live DOM nodes + images */
+           const pages=Math.max(1,Math.ceil(list.length/pageSize));if(page>=pages)page=pages-1;if(page<0)page=0;
+           const slice=list.slice(page*pageSize,(page+1)*pageSize);
+           const cur=$('#target')?$('#target').value:'';
+           const grid=$('#items');const order=[...grid.children].map(el=>+el.dataset.id);
+           const sameOrder=order.length===slice.length&&order.every((id,k)=>id===slice[k].id);
+           if(!sameOrder){grid.innerHTML=slice.map(i=>{cardSig.set(i.id,JSON.stringify(i)+cur+openPrompts.has(i.id)+openPrompts.has('m'+i.id)+(editId===i.id));return itemCard(i)}).join('');for(const k of [...cardSig.keys()])if(!slice.some(i=>i.id===k))cardSig.delete(k)}
+           else{slice.forEach(i=>{const sig=JSON.stringify(i)+cur+openPrompts.has(i.id)+openPrompts.has('m'+i.id)+(editId===i.id);if(cardSig.get(i.id)===sig)return;const el=grid.querySelector(\`[data-id="\${i.id}"]\`);if(i.id===editId&&el&&el.querySelector('.medit'))return;cardSig.set(i.id,sig);if(el)el.outerHTML=itemCard(i)})}
+           const pg=$('#pager');pg.style.display=list.length>pageSize||pageSize!==24?'':'none';
+           pg.innerHTML=\`<span>Showing <b>\${list.length?page*pageSize+1:0}–\${Math.min(list.length,(page+1)*pageSize)}</b> of <b>\${list.length}</b></span><span class="sp"></span><button onclick="goPage(0)" \${page===0?'disabled':''}>«</button><button onclick="goPage(\${page-1})" \${page===0?'disabled':''}>‹</button><span>page <b>\${page+1}</b> / \${pages}</span><button onclick="goPage(\${page+1})" \${page>=pages-1?'disabled':''}>›</button><button onclick="goPage(\${pages-1})" \${page>=pages-1?'disabled':''}>»</button><select onchange="setPageSize(this.value)">\${[12,24,48,96].map(n=>\`<option value="\${n}"\${n===pageSize?' selected':''}>\${n} / page</option>\`).join('')}</select>\`;
+           $('#acctsum').innerHTML='<span class="lbl">Sent per account</span>'+accts().map(a=>{const n=s.items.filter(i=>i.distributed.some(d=>d.dbName===a)).length;return \`<button class="\${acls(a)} \${filter==='acct:'+a?'on':''} \${n?'':'none'}" onclick="acctFilter('\${a}')"><i></i>\${a} <b>\${n}</b></button>\`}).join('')+(s.items.some(i=>i.status==='done'&&!i.distributed.length)?\`<button class="\${filter==='unsent'?'on':''}" onclick="acctFilter('unsent')">not sent <b>\${s.items.filter(i=>i.status==='done'&&!i.distributed.length).length}</b></button>\`:'')+(t.metaNeeded?\`<button class="meta \${filter==='nometa'?'on':''}" onclick="acctFilter('nometa')"><i></i>needs metadata <b>\${t.metaNeeded}</b></button>\`:'')+(t.metaHeld?\`<button class="held \${filter==='held'?'on':''}" onclick="acctFilter('held')"><i></i>policy hold <b>\${t.metaHeld}</b></button>\`:'');
            const lg=$('#log');const atBottom=lg.scrollHeight-lg.scrollTop-lg.clientHeight<40;
-           lg.innerHTML=s.log.slice(-200).map(l=>{const m=l.match(/^(\\[[^\\]]+\\])\\s?(.*)$/);const body=m?m[2]:l;const cls=/✅|🔥|🏁/.test(body)?'ok':/❌|✖/.test(body)?'er':/⚠️|⟳|⏸/.test(body)?'wn':/🎨|📥|☁️|🚀|🔑|▶️/.test(body)?'in':'';return \`<span class="ts">\${esc(m?m[1]:'')}</span> <span class="\${cls}">\${esc(body)}</span>\`}).join('\\n');
-           if(atBottom)lg.scrollTop=lg.scrollHeight;$('#lastLog').textContent=s.log.length?s.log[s.log.length-1].replace(/^\\[[^\\]]+\\]\\s?/,''):'waiting for the runner…'}
+           if(lg.dataset.last!==s.log[s.log.length-1])lg.innerHTML=s.log.slice(-200).map(l=>{const m=l.match(/^(\\[[^\\]]+\\])\\s?(.*)$/);const body=m?m[2]:l;const cls=/✅|🔥|🏁/.test(body)?'ok':/❌|✖/.test(body)?'er':/⚠️|⟳|⏸/.test(body)?'wn':/🎨|📥|☁️|🚀|🔑|▶️/.test(body)?'in':'';return \`<span class="ts">\${esc(m?m[1]:'')}</span> <span class="\${cls}">\${esc(body)}</span>\`}).join('\\n');
+           if(atBottom)lg.scrollTop=lg.scrollHeight;lg.dataset.last=s.log[s.log.length-1]||'';$('#lastLog').textContent=s.log.length?s.log[s.log.length-1].replace(/^\\[[^\\]]+\\]\\s?/,''):'waiting for the runner…'}
 
-          async function poll(){try{const r=await fetch('/api/state',{cache:'no-store'});if(r.status===401){location.reload();return}S=await r.json();if(!inited){fillSettings();inited=true}render()}catch(e){$('#status').className='status';$('#status').querySelector('span').textContent='reconnecting…'}}
+          async function poll(){try{const r=await fetch('/api/state?v='+(ver||''),{cache:'no-store'});if(r.status===401){location.reload();return}const d=await r.json();if(d.unchanged){if(S){S.now=d.now;const left=Math.max(0,S.deadline-S.now);$('#tLeft').textContent=fmtLeft(left);ring($('#rTime'),left/(S.deadline-S.startedAt))}return}S=d;ver=d.version;if(!inited){fillSettings();inited=true}render()}catch(e){$('#status').className='status';$('#status').querySelector('span').textContent='reconnecting…'}}
           window.redoMeta=async id=>{const i=S.items.find(x=>x.id===id);if(i&&i.meta&&!confirm(\`Ask Gemini Web again for this \${i.type==='SINGLE'?'image':'set'}?\${i.distributed.length?\`\\nThe new metadata will be patched on \${i.distributed.length} sent record(s).\`:''}\`))return;try{await api('/api/meta/redo',{id});toast('Queued for Gemini Web','good')}catch(e){toast(e.message,'bad')}poll()};
           window.editMeta=id=>{editId=id;render()};window.cancelEdit=()=>{editId=null;render()};
           window.saveMeta=async(ev,id)=>{ev.preventDefault();const f=new FormData(ev.target);try{const r=await api('/api/meta/set',{id,title:f.get('title'),tags:f.get('tags'),category:f.get('category'),description:f.get('description')});editId=null;toast(r.patched?\`Metadata saved · \${r.patched} Firebase record(s) patched\`:'Metadata saved','good')}catch(e){toast(e.message,'bad')}poll()};
           $('#metaRunBtn').onclick=async()=>{try{const r=await api('/api/meta/run');toast(r.queued?\`\${r.queued} item(s) queued for Gemini Web\`:'Gemini worker (re)started','good')}catch(e){toast(e.message,'bad')}poll()};
           $('#metaRefreshBtn').onclick=async()=>{try{await api('/api/meta/refresh');toast('Record status refreshed from Firebase')}catch(e){toast(e.message,'bad')}poll()};
-          window.acctFilter=a=>{const f=(a==='unsent'||a==='nometa'||a==='held')?a:'acct:'+a;filter=filter===f?'all':f;$$('#filters button').forEach(x=>x.classList.toggle('on',x.dataset.f===(filter==='all'?'all':'')));render()};
+          window.acctFilter=a=>{const f=(a==='unsent'||a==='nometa'||a==='held')?a:'acct:'+a;filter=filter===f?'all':f;page=0;$$('#filters button').forEach(x=>x.classList.toggle('on',x.dataset.f===(filter==='all'?'all':'')));render()};
           window.togglePrompt=id=>{openPrompts.has(id)?openPrompts.delete(id):openPrompts.add(id);render()};
+          window.goPage=n=>{page=n;render();$('#items').scrollIntoView({block:'start',behavior:'smooth'})};window.setPageSize=n=>{pageSize=+n;localStorage.setItem('pageSize',n);page=0;render()};
           window.lb=(src,cap)=>{$('#lbImg').src=src;$('#lbCap').textContent=cap;$('#lb').classList.add('on')};$('#lb').onclick=()=>$('#lb').classList.remove('on');document.addEventListener('keydown',e=>{if(e.key==='Escape')$('#lb').classList.remove('on')});
           window.retry=async(id,frame)=>{try{await api('/api/retry',{id,frame});toast(frame===undefined?'Re-queued failed frames':'Frame re-queued')}catch(e){toast(e.message,'bad')}poll()};
           window.del=async id=>{if(!confirm('Remove this item and its files?'))return;try{await api('/api/delete',{id})}catch(e){toast(e.message,'bad')}poll()};
@@ -4279,12 +4414,12 @@ jobs:
           $('#distAllBtn').onclick=async()=>{try{const r=await api('/api/distribute',{ids:'all',target:$('#target').value});toast(\`Distributing \${r.count} item(s) → \${$('#target').value}\${r.skipped?\` · \${r.skipped} waiting for metadata\`:''}\`,'good')}catch(e){toast(e.message,'bad')}poll()};
           $('#pauseBtn').onclick=async()=>{await api('/api/pause',{paused:!S.paused});poll()};
           document.addEventListener('change',e=>{if(e.target&&e.target.id==='target'&&S){$('#spreadBox').style.display=e.target.value==='spread'?'':'none';render()}});
-          $$('#filters button').forEach(b=>b.onclick=()=>{filter=b.dataset.f;$$('#filters button').forEach(x=>x.classList.toggle('on',x===b));render()});
+          $$('#filters button').forEach(b=>b.onclick=()=>{filter=b.dataset.f;page=0;$$('#filters button').forEach(x=>x.classList.toggle('on',x===b));render()});
           $('#consoleBar').onclick=()=>{const c=$('#console');c.classList.toggle('open');$('#consoleHint').textContent=c.classList.contains('open')?'▼ close':'▲ open';if(c.classList.contains('open')){const lg=$('#log');lg.scrollTop=lg.scrollHeight}};
           $('#finishBtn').onclick=async()=>{const nd=S.items.filter(i=>i.status==='done'&&!i.distributed.length).length,busy=S.items.filter(i=>i.status==='running'||i.status==='queued').length;
            if(!confirm(\`Finish the session?\${busy?\`\\n• \${busy} item(s) still queued/rendering will be abandoned.\`:''}\${nd?\`\\n• \${nd} completed item(s) are NOT distributed (they stay in the ZIP artifact).\`:''}\${S.settings.runMetadata&&S.totals.records>S.totals.metaReady?'\\n• The final Gemini‑Web metadata pass runs next for records still missing metadata.':''}\`))return;await api('/api/finish');toast('Finishing session…');poll()};
           $$('[data-save]').forEach(b=>b.onclick=async()=>{const pane=b.closest('.pane'),msgEl=pane.querySelector('[id^=saveMsg]');try{
-           const settings={model:$('#model').value,res:$('#res').value,ratio:$('#ratio').value,boost:$('#boost').value,display:$('#display').value,strength:$('#strength').value,upscale:$('#upscale').checked,concurrency:$('#concurrency').value,targetAccount:$('#target').value,spreadPool:$$('#spreadPool .sp:checked').map(x=>x.value),queuePath:$('#queuePath').value,autoDistribute:$('#autoDistribute').checked,requireMetadata:$('#requireMetadata').checked,runMetadata:$('#runMetadata').checked,autoMetadata:$('#autoMetadata').checked,autoFinishMinutes:$('#autoFinish').value};
+           const settings={model:$('#model').value,res:$('#res').value,ratio:$('#ratio').value,boost:$('#boost').value,display:$('#display').value,strength:$('#strength').value,upscale:$('#upscale').checked,concurrency:$('#concurrency').value,targetAccount:$('#target').value,spreadPool:$$('#spreadPool .sp:checked').map(x=>x.value),queuePath:$('#queuePath').value,autoDistribute:$('#autoDistribute').checked,requireMetadata:$('#requireMetadata').checked,metaAutoRetry:$('#metaAutoRetry').value,runMetadata:$('#runMetadata').checked,autoMetadata:$('#autoMetadata').checked,autoFinishMinutes:$('#autoFinish').value};
            const credentials={cloud_name:$('#c_cloud').value.trim(),api_key:$('#c_key').value.trim(),api_secret:$('#c_secret').value.trim()};
            const r=await api('/api/settings',{settings,credentials});msgEl.textContent='Saved ✓'+(r.creds.ok?'':' · keys still missing');$('#c_key').value='';$('#c_secret').value='';toast('Settings saved','good')}catch(e){msgEl.textContent=e.message;toast(e.message,'bad')}poll()});
           $('#addBtn').onclick=async()=>{const m=$('#addMsg');try{$('#addBtn').disabled=true;const r=await api('/api/prompts',{text:$('#ptext').value,type:document.querySelector('input[name=ptype]:checked').value,copies:$('#copies').value});
