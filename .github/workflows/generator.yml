@@ -2978,11 +2978,80 @@ jobs:
           };
           const NO_DUPE = 'Do not return the reference unchanged. Do not add unplanned structures, duplicate the subject, or redesign it.';
 
+          // ─── 24-HOUR: SAME SCENE, FOUR CLEARLY DIFFERENT TIMES OF DAY ──────────────
+          // The four frames must read as ONE place photographed at four moments: identical subject,
+          // identical location, identical camera. What changes is the sky, the light, the shadows,
+          // the weather/atmosphere and the lights that switch on. Each item draws its own atmosphere
+          // pack (seeded by the folder) so two similar prompts do not produce identical-looking sets.
+          const TIME_LOCK = 'HARD CONSISTENCY RULE: this is the SAME scene as reference image [1], photographed later in the day. Keep the identical subject, identical materials and colours of the subject, identical location, identical background structures and horizon, identical camera angle, distance and composition. Do not move, resize, redesign or replace anything, and do not add or remove objects.';
+          const TIME_PUSH = 'ONLY the time of day changes, and it must change unmistakably: sky colour and cloud state, direction, colour and hardness of the light, length and direction of the shadows, overall colour temperature, atmosphere, and which lights are switched on. Someone seeing the four frames side by side must instantly name the hour, while still recognising the very same place.';
+          const SCENE_PACKS = {
+            morning: [
+              'Low ground mist drifting through the same scene, pale blue-to-peach gradient sky with thin streaked clouds, dew highlights and soft god-rays through the haze.',
+              'Clear crisp dawn: cold blue sky warming to gold at the horizon, delicate bloom around the very low side-sun, long soft shadows across the same ground.',
+              'Morning right after rain: the same surfaces wet and reflective with shallow puddles, diffused pastel light, thin steam rising.',
+              'Fresh early morning: cool clean air, faint pollen and dust floating in the low warm sunbeams, gentle pink-and-mint sky gradient.',
+              'Dawn with a low cloud layer behind the scene, cold blue shadow side and a thin warm rim of first light along every upper edge.',
+              'Soft hazy sunrise: pale gold light washing the same scene from one side, muted colours, calm still atmosphere.'
+            ],
+            afternoon: [
+              'Bright blue midday sky with big sculpted cumulus clouds over the same scene, crisp short shadows, clean high-contrast air, no haze.',
+              'Brilliant dry afternoon: heat shimmer rising off the same surfaces, hard specular highlights, deeply saturated blue sky.',
+              'Full sun with fast-moving clouds: dappled sun patches sliding over the same ground, vivid natural colours, sharp edges.',
+              'Sun shower over the same place: bright sunlight together with falling rain streaks and a faint rainbow, glossy wet highlights.',
+              'Clean bright noon: the same surroundings reflecting an open sky, hard geometric shadow shapes, airy high-key palette.',
+              'High-key afternoon with light haze near the horizon, sunlit dust in the air, strong bloom on the brightest edges.'
+            ],
+            evening: [
+              'Golden hour over the same scene: deep orange-magenta sky with layered clouds, low sun flare, long dramatic shadows.',
+              'Blue hour just after sunset: violet-indigo sky above a thin burning orange band, the first small lights of the scene switching on.',
+              'Stormy sunset: dark purple cloud banks with fiery gaps above the same place, distant lightning, hard dramatic contrast.',
+              'Hazy amber dusk: thick warm atmosphere, the sun a soft red disc, dust and embers in the air, everything bathed in copper.',
+              'Evening rain: the same ground wet and reflecting orange and magenta light, rain streaks, warm bokeh from small lamps.',
+              'Backlit sunset: the subject strongly rim-lit against a glowing horizon, the rest of the scene sinking into warm shadow.'
+            ],
+            night: [
+              'Deep clear night over the same scene: dense star field, cool moonlight, the subject lit mostly by its own glow.',
+              'Aurora night: green-violet aurora ribbons across the dark sky above the same place, cold ambient light, faint stars.',
+              'Night with distant coloured lights: neon reflections on the same surfaces, light fog catching the beams, deep blue shadows.',
+              'Foggy moonlit night: low fog through the same scene, visible light shafts, silver rim light on every edge.',
+              'Cold clear night under a big low moon, faint backlit clouds, the same horizon shapes as silhouettes.',
+              'Glowing night: fireflies or luminous particles drifting through the same scene, deep teal darkness, soft light pools.'
+            ]
+          };
+          // The edit model sometimes drops the whole environment and returns the subject on bare black.
+          // Blocked in the prompt and then verified on the rendered pixels (checkFrameLight below).
+          const NO_VOID = 'The complete environment from the reference must stay visible and fully rendered: never return the subject on an empty black, flat or void background.';
+          const NO_VOID_NIGHT = 'It is night, so the scene is dark — but the same environment must still be readable through moonlight, glow, fog or distant lights. Never return a flat empty black canvas with only the subject on it.';
+          // Minimum average brightness accepted per slot (0–1); darker than this = the scene was lost.
+          const MIN_LUMA = { morning: 0.16, afternoon: 0.23, evening: 0.09, night: 0.015 };
+          const DARK_FIX = 'The previous attempt returned an almost black image with the environment missing. Render the full scene from the reference image again, with its background, horizon and surroundings clearly visible and correctly lit for this time of day.';
+          const SAME_FIX = 'The previous attempt was almost identical to the reference. Keep the same scene and subject, but push the time-of-day change much further: different sky, different light direction and colour, different shadows and atmosphere.';
+          const DRIFT_FIX = 'The previous attempt changed the scene itself. Rebuild it exactly as in the reference image — same subject, same background, same camera — and change only the time-of-day lighting and atmosphere.';
+
+          const hashSeed = s => { let h = 2166136261; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return h >>> 0; };
+          // One atmosphere pack per slot, per item. `reroll` (a slot name) picks a different pack for that
+          // frame only, so "Regenerate" on a single frame gives a genuinely new look.
+          function buildScenePlan(item, reroll) {
+            if (item.type !== '24-HOUR' || (item.settings.sceneVary || 'on') === 'off') return null;
+            const base = hashSeed(item.folder + '|' + (item.prompt || ''));
+            const plan = { ...(item.scenePlan || {}) };
+            for (const f of SET_FRAMES['24-HOUR'].frames) {
+              if (plan[f.slot] && reroll !== f.slot) continue;
+              const pool = SCENE_PACKS[f.slot] || [];
+              if (!pool.length) continue;
+              let idx = (base + f.slot.length * 7) % pool.length;
+              if (reroll === f.slot) { const fr = item.frames.find(x => x.slot === f.slot); idx = (idx + 1 + ((fr && fr.attempts) || 0)) % pool.length; }
+              plan[f.slot] = pool[idx];
+            }
+            return plan;
+          }
+
           // Frame "slot" names match the Firebase wallpaper-set records the metadata job + Zedge bot already read.
           const SET_FRAMES = {
             '24-HOUR': {
               contentType: 'WALLPAPER_24H',
-              design: 'Design the scene so that time of day is unmistakable: include sky or ambient light, a dominant light source and visible shadows. This frame is the MORNING state.',
+              design: 'Design ONE fixed scene that will be re-photographed at four different times of day: a clear subject inside a real environment with a visible sky or ambient light source, a readable horizon/background and visible shadows, so the hour can change without the place changing. Never place the subject on a plain black or empty background. This frame is the MORNING state.',
               frames: [
                 { file: '01_morning.jpg',   slot: 'morning',   name: 'Morning',   instr: 'MORNING: pale cool-blue to soft peach sky, low sun from the side, long soft shadows, gentle mist, fresh muted palette, low contrast.' },
                 { file: '02_afternoon.jpg', slot: 'afternoon', name: 'Afternoon', instr: 'AFTERNOON: bright clear daylight, sun high overhead, short hard shadows, the brightest and most saturated frame, crisp clean contrast, no mist.' },
@@ -3035,6 +3104,7 @@ jobs:
           const state = {
             settings: {
               model: 'gpt-image-2.5-sunburst', res: '2K', ratio: '9:16', boost: 'vivid', display: 'any', strength: 'clear', upscale: true,
+              sceneVary: 'on',        // 24-Hour sets: same scene + subject, but each hour gets its own sky / weather / atmosphere pack
               concurrency: 2,
               targetAccount: (FIREBASE_DB_MAP[(process.env.TARGET_ACCOUNT || '').trim().toLowerCase()] ? (process.env.TARGET_ACCOUNT || '').trim().toLowerCase() : 'zedge_2'),   // never "all_accounts" here
               queuePath: (process.env.IMAGE_QUEUE_PATH || 'wallpaperQueue').trim(),
@@ -3139,9 +3209,10 @@ jobs:
             const st = { ...state.settings, ...(o.settings || {}) };
             if (type !== 'SINGLE') st.ratio = '9:16';
             const folder = `${pad2(index)}_${slug(concept)}_${type}`;
-            return {
+            const item = {
               id: nextId++, index, type, concept, prompt: o.prompt, folder,
-              settings: { model: st.model, res: st.res, ratio: st.ratio, boost: st.boost, display: st.display, strength: st.strength, upscale: !!st.upscale },
+              settings: { model: st.model, res: st.res, ratio: st.ratio, boost: st.boost, display: st.display, strength: st.strength, upscale: !!st.upscale, sceneVary: st.sceneVary === 'off' ? 'off' : 'on' },
+              scenePlan: null,
               status: 'queued', anchorId: null, error: '',
               frames: def.frames.map(f => ({ file: f.file, slot: f.slot, name: f.name, status: 'queued', url: '', localPath: '', size: 0, error: '', attempts: 0 })),
               distributed: [], distributeStatus: '', distributeError: '',
@@ -3150,6 +3221,8 @@ jobs:
               metadata: { file: def.frames[0].file, title: concept.slice(0, 25), tags: tagsFrom(o.prompt || concept), category: 'DESIGNS', description: (o.prompt || concept).replace(/\s+/g, ' ').slice(0, 200) },
               createdAt: Date.now()
             };
+            item.scenePlan = buildScenePlan(item);
+            return item;
           }
 
           async function generateFrame(item, f) {
@@ -3159,13 +3232,19 @@ jobs:
             const grade = grading(st);
             const rules = (item.type === 'SINGLE' && st.ratio !== '9:16') ? BASE_RULES_FREE : BASE_RULES;
             const S = STRENGTH[st.strength] || STRENGTH.clear;
-            const prompt = isAnchor
-              ? [item.prompt, def.design, fdef.instr, grade, rules].filter(Boolean).join('\n\n')
-              : [item.prompt ? 'Concept: ' + item.prompt : '', S.lock, S.push, 'STATE TO RENDER — ' + fdef.instr, NO_DUPE, grade, rules].filter(Boolean).join('\n\n');
-            frame.status = 'running'; frame.error = ''; saveState();
-            let lastErr = null;
-            for (let attempt = 1; attempt <= 3; attempt++) {
+            const is24 = item.type === '24-HOUR';
+            const voidRule = is24 ? (fdef.slot === 'night' ? NO_VOID_NIGHT : NO_VOID) : '';
+            const buildPrompt = fix => { const atmo = (item.scenePlan && item.scenePlan[fdef.slot]) || ''; return (isAnchor
+              ? [item.prompt, def.design, fdef.instr, atmo && 'ATMOSPHERE FOR THIS FRAME — ' + atmo, voidRule, grade, rules, fix]
+              : [item.prompt ? 'Concept: ' + item.prompt : '', is24 ? TIME_LOCK : S.lock, is24 ? TIME_PUSH : S.push,
+                 'STATE TO RENDER — ' + fdef.instr, atmo && 'ATMOSPHERE FOR THIS FRAME — ' + atmo, voidRule, NO_DUPE, grade, rules, fix]
+            ).filter(Boolean).join('\n\n'); };
+            frame.status = 'running'; frame.error = ''; frame.warn = ''; saveState();
+            let lastErr = null, fixHint = '';
+            for (let attempt = 1; attempt <= 4; attempt++) {
+              if (attempt === 4 && !fixHint) break;                 // 4th try only exists for a quality re-render
               frame.attempts++;
+              const prompt = buildPrompt(fixHint);
               try {
                 const payload = {
                   prompt,
@@ -3182,6 +3261,18 @@ jobs:
                 const dir = path.join(OUT_DIR, item.folder); fs.mkdirSync(dir, { recursive: true });
                 const localPath = path.join(dir, fdef.file);
                 fs.writeFileSync(localPath, buf);
+                // Quality gate for time-of-day sets: the render must keep the scene (not a black void)
+                // and must actually look like a different hour than the morning anchor.
+                const qc = await qcFrame(item, f, fdef, localPath);
+                if (qc && attempt < 4) {
+                  fixHint = qc.fix;
+                  log(`🔍 ${item.folder}/${fdef.file}: ${qc.msg} — re-rendering`);
+                  if (is24 && qc.kind !== 'drift') { item.scenePlan = buildScenePlan(item, fdef.slot); }
+                  lastErr = new Error(qc.msg);
+                  await sleep(1200);
+                  continue;
+                }
+                if (qc) { frame.warn = qc.msg; log(`⚠️ ${item.folder}/${fdef.file}: ${qc.msg} — keeping the last render`); }
                 frame.url = url; frame.localPath = localPath; frame.size = buf.length; frame.status = 'done'; frame.error = '';
                 makeThumb(item, frame);
                 log(`✅ ${item.folder}/${fdef.file} (${(buf.length / 1024).toFixed(0)} KB)`);
@@ -3196,7 +3287,7 @@ jobs:
                   frame.status = 'queued'; frame.error = err.message; saveState();
                   return false;
                 }
-                log(`⚠️ ${item.folder}/${fdef.file} attempt ${attempt}/3: ${err.message}`);
+                log(`⚠️ ${item.folder}/${fdef.file} attempt ${attempt}: ${err.message}`);
                 if (attempt < 3) await sleep(2000 * attempt);
               }
             }
@@ -3210,6 +3301,36 @@ jobs:
           const THUMB_DIR = '.thumbs';
           let thumbTool = null;
           for (const t of ['magick', 'convert']) { try { execSync(`${t} -version`, { stdio: 'ignore' }); thumbTool = t; break; } catch {} }
+          // ─── FRAME QUALITY GATE (24-HOUR sets) ─────────────────────────────────────
+          // Two failure modes we saw in production: (a) the edit model drops the whole environment and
+          // returns the subject on bare black, (b) it returns a near copy of the anchor. Both are checked
+          // on the rendered pixels with ImageMagick and trigger one corrective re-render.
+          const execFileP = (cmd, args) => new Promise(r => execFile(cmd, args, { timeout: 30000 }, (err, stdout) => r(err ? null : String(stdout).trim())));
+          async function meanLuma(file) {
+            const out = await execFileP(thumbTool, [file, '-resize', '64x114!', '-colorspace', 'Gray', '-format', '%[fx:mean]', 'info:']);
+            const v = parseFloat(out); return Number.isFinite(v) ? v : null;
+          }
+          async function sceneDelta(a, b) {
+            const out = await execFileP(thumbTool, [a, b, '-resize', '64x114!', '-metric', 'RMSE', '-compare', '-format', '%[distortion]', 'info:']);
+            const v = parseFloat(out); return Number.isFinite(v) ? v : null;
+          }
+          async function qcFrame(item, idx, fdef, localPath) {
+            if (item.type !== '24-HOUR' || !thumbTool) return null;
+            try {
+              const lum = await meanLuma(localPath);
+              const min = MIN_LUMA[fdef.slot];
+              if (lum !== null && min !== undefined && lum < min) return { kind: 'dark', fix: DARK_FIX, msg: `scene lost — almost black for ${fdef.slot} (brightness ${lum.toFixed(3)} < ${min})` };
+              if (idx > 0 && fdef.slot !== 'night') {
+                const anchor = item.frames[0].localPath;
+                if (anchor && fs.existsSync(anchor)) {
+                  const d = await sceneDelta(anchor, localPath);
+                  if (d !== null && d < 0.045) return { kind: 'same', fix: SAME_FIX, msg: `too close to the morning frame (Δ ${d.toFixed(3)})` };
+                  if (d !== null && d > 0.70) return { kind: 'drift', fix: DRIFT_FIX, msg: `scene drifted from the morning frame (Δ ${d.toFixed(3)})` };
+                }
+              }
+            } catch { return null; }
+            return null;
+          }
           function makeThumb(item, frame) {
             if (!thumbTool) return;
             const dir = path.join(OUT_DIR, item.folder, THUMB_DIR); fs.mkdirSync(dir, { recursive: true });
@@ -3776,6 +3897,7 @@ jobs:
               if (STRENGTH[String(it.strength || '').toLowerCase()]) settings.strength = String(it.strength).toLowerCase();
               if (RATIOS[String(it.ratio || '')]) settings.ratio = String(it.ratio);
               if (typeof it.upscale === 'boolean') settings.upscale = it.upscale;
+              if (it.sceneVary === 'on' || it.sceneVary === 'off') settings.sceneVary = it.sceneVary;
               const concept = String(it.concept || it.name || it.title || '').trim();
               for (let c = 0; c < copies; c++) out.push({ type, prompt, concept: copies > 1 && concept ? `${concept} v${c + 1}` : concept, settings });
             });
@@ -3832,6 +3954,7 @@ jobs:
                 if (DISPLAY[s.display] !== undefined) state.settings.display = s.display;
                 if (STRENGTH[s.strength]) state.settings.strength = s.strength;
                 if (typeof s.upscale === 'boolean') state.settings.upscale = s.upscale;
+                if (s.sceneVary === 'on' || s.sceneVary === 'off') state.settings.sceneVary = s.sceneVary;
                 if (s.concurrency) state.settings.concurrency = Math.max(1, Math.min(4, parseInt(s.concurrency, 10) || 1));
                 if (s.targetAccount && (FIREBASE_DB_MAP[s.targetAccount] || s.targetAccount === SPREAD)) state.settings.targetAccount = s.targetAccount;
                 if (Array.isArray(s.spreadPool)) { const pool = [...new Set(s.spreadPool.filter(a => FIREBASE_DB_MAP[a]))]; if (pool.length) state.settings.spreadPool = pool; }
@@ -3873,10 +3996,11 @@ jobs:
                 if (typeof which === 'number') {
                   if (!item.frames[which]) throw new Error('frame not found');
                   item.frames[which].status = 'queued';
+                  item.scenePlan = buildScenePlan(item, item.frames[which].slot);   // new atmosphere for that time slot
                   if (which === 0) { item.anchorId = null; item.frames.forEach((f, i) => { if (i > 0) f.status = 'queued'; }); }
                   if (which === 0 && item.frames.length > 1) log(`⟳ ${item.folder}: anchor regenerated — all variants re-queued to stay consistent`);
                 } else {
-                  item.frames.forEach(f => { if (f.status !== 'done') f.status = 'queued'; });
+                  item.frames.forEach(f => { if (f.status !== 'done') { f.status = 'queued'; item.scenePlan = buildScenePlan(item, f.slot); } });
                   if (item.frames[0].status !== 'done') item.anchorId = null;
                 }
                 item.status = 'queued'; item.error = ''; item.distributed = []; item.distributeStatus = ''; item.distributeError = '';
@@ -4213,6 +4337,10 @@ jobs:
               <div><label class="l">Display</label><select id="display"><option value="any">Any phone</option><option value="amoled">AMOLED</option><option value="lcd">LCD</option></select></div>
               <div><label class="l">Variation</label><select id="strength"><option value="subtle">Subtle</option><option value="clear">Clear</option><option value="strong">Strong</option></select></div>
              </div>
+             <div style="margin-top:12px">
+              <label class="l">24‑Hour look</label><select id="sceneVary"><option value="on">Same scene · each hour gets its own sky, weather &amp; atmosphere</option><option value="off">Same scene · relight only (no weather change)</option></select>
+              <p class="lead" style="margin-top:6px">Subject, place, background and camera stay locked across all four frames — only the time of day changes. Every render is checked: an almost‑black frame or a near‑copy of the morning frame is re‑rendered automatically.</p>
+             </div>
              <div style="margin-top:14px">
               <label class="sw"><span class="t">AI upscale before crop<small><code>e_upscale</code> → 1620 × 2880 · slower but sharper</small></span><input type="checkbox" id="upscale"><span class="k"></span></label>
              </div>
@@ -4336,13 +4464,13 @@ jobs:
            $('#ratio').innerHTML=S.ratios.map(r=>\`<option\${r===s.ratio?' selected':''}>\${r}</option>\`).join('');
            $('#target').innerHTML=S.accounts.map(a=>\`<option value="\${a}"\${a===s.targetAccount?' selected':''}>\${a==='spread'?'spread — each item to a different account':a}</option>\`).join('');
            $('#spreadPool').innerHTML=accts().map(a=>\`<label class="chip" style="cursor:pointer;display:inline-flex;gap:6px;align-items:center"><input type="checkbox" class="sp" value="\${a}"\${(s.spreadPool||accts()).includes(a)?' checked':''}>\${a} <b style="color:var(--faint)">\${(S.spreadCounts||{})[a]??0}</b></label>\`).join('');$('#spreadBox').style.display=$('#target').value==='spread'?'':'none';
-           $('#res').value=s.res;$('#concurrency').value=s.concurrency;$('#boost').value=s.boost;$('#display').value=s.display;$('#strength').value=s.strength;$('#upscale').checked=s.upscale;
+           $('#res').value=s.res;$('#concurrency').value=s.concurrency;$('#boost').value=s.boost;$('#display').value=s.display;$('#strength').value=s.strength;$('#sceneVary').value=s.sceneVary||'on';$('#upscale').checked=s.upscale;
            $('#queuePath').value=s.queuePath;$('#autoDistribute').checked=s.autoDistribute;$('#requireMetadata').checked=s.requireMetadata;$('#metaAutoRetry').value=String(s.metaAutoRetry??4);$('#runMetadata').checked=s.runMetadata;$('#autoMetadata').checked=s.autoMetadata;$('#autoFinish').value=s.autoFinishMinutes;$('#c_cloud').value=S.creds.cloud_name||''}
 
           function itemCard(i){
            const done=i.frames.filter(f=>f.status==='done').length,n=i.frames.length;
            const shape=i.type==='SINGLE'&&i.settings.ratio!=='9:16'?(i.settings.ratio==='1:1'?' sq':(i.settings.ratio==='16:9'||i.settings.ratio==='4:3')?' land':''):'';
-           const frames=i.frames.map((f,k)=>\`<div class="fr \${f.status}\${shape}" title="\${esc(f.name)}\${f.error?' — '+esc(f.error):''}">\${f.status==='done'?\`<img src="\${f.thumb}" loading="lazy" alt="\${esc(f.file)}" onclick="lb('\${f.full||f.thumb}','\${esc(i.folder)} · \${esc(f.file)}')">\`:\`<div class="ph">\${f.status==='running'?'rendering…':f.status==='failed'?'failed':'queued'}</div>\`}\${i.status!=='running'&&!i.distributed.length?\`<button class="re" title="Regenerate \${esc(f.name)}" onclick="retry(\${i.id},\${k})">\${RE}</button>\`:''}<div class="cap">\${esc(f.name)}</div></div>\`).join('');
+           const frames=i.frames.map((f,k)=>\`<div class="fr \${f.status}\${shape}" title="\${esc(f.name)}\${f.error?' — '+esc(f.error):''}\${f.warn?' — ⚠ '+esc(f.warn):''}">\${f.status==='done'?\`<img src="\${f.thumb}" loading="lazy" alt="\${esc(f.file)}" onclick="lb('\${f.full||f.thumb}','\${esc(i.folder)} · \${esc(f.file)}')">\`:\`<div class="ph">\${f.status==='running'?'rendering…':f.status==='failed'?'failed':'queued'}</div>\`}\${i.status!=='running'&&!i.distributed.length?\`<button class="re" title="Regenerate \${esc(f.name)}" onclick="retry(\${i.id},\${k})">\${RE}</button>\`:''}<div class="cap">\${f.warn?'⚠ ':''}\${esc(f.name)}</div></div>\`).join('');
            const dist=i.distributed.length?\`<span class="st dist">🔒 \${esc(i.distributed[0].dbName)} only</span>\`:'';const mst=i.status==='done'&&i.meta&&i.meta.title?\`<span class="st dist" style="color:\${i.meta.policyCheck==='held'?'#ffb3b3':'#9ef0c6'}">\${i.meta.policyCheck==='held'?'🛑 held':'🧠 meta ✓'}</span>\`:'';
            const busyDist='';
            return \`<article class="item \${i.status}" data-id="\${i.id}">
@@ -4419,7 +4547,7 @@ jobs:
           $('#finishBtn').onclick=async()=>{const nd=S.items.filter(i=>i.status==='done'&&!i.distributed.length).length,busy=S.items.filter(i=>i.status==='running'||i.status==='queued').length;
            if(!confirm(\`Finish the session?\${busy?\`\\n• \${busy} item(s) still queued/rendering will be abandoned.\`:''}\${nd?\`\\n• \${nd} completed item(s) are NOT distributed (they stay in the ZIP artifact).\`:''}\${S.settings.runMetadata&&S.totals.records>S.totals.metaReady?'\\n• The final Gemini‑Web metadata pass runs next for records still missing metadata.':''}\`))return;await api('/api/finish');toast('Finishing session…');poll()};
           $$('[data-save]').forEach(b=>b.onclick=async()=>{const pane=b.closest('.pane'),msgEl=pane.querySelector('[id^=saveMsg]');try{
-           const settings={model:$('#model').value,res:$('#res').value,ratio:$('#ratio').value,boost:$('#boost').value,display:$('#display').value,strength:$('#strength').value,upscale:$('#upscale').checked,concurrency:$('#concurrency').value,targetAccount:$('#target').value,spreadPool:$$('#spreadPool .sp:checked').map(x=>x.value),queuePath:$('#queuePath').value,autoDistribute:$('#autoDistribute').checked,requireMetadata:$('#requireMetadata').checked,metaAutoRetry:$('#metaAutoRetry').value,runMetadata:$('#runMetadata').checked,autoMetadata:$('#autoMetadata').checked,autoFinishMinutes:$('#autoFinish').value};
+           const settings={model:$('#model').value,res:$('#res').value,ratio:$('#ratio').value,boost:$('#boost').value,display:$('#display').value,strength:$('#strength').value,sceneVary:$('#sceneVary').value,upscale:$('#upscale').checked,concurrency:$('#concurrency').value,targetAccount:$('#target').value,spreadPool:$$('#spreadPool .sp:checked').map(x=>x.value),queuePath:$('#queuePath').value,autoDistribute:$('#autoDistribute').checked,requireMetadata:$('#requireMetadata').checked,metaAutoRetry:$('#metaAutoRetry').value,runMetadata:$('#runMetadata').checked,autoMetadata:$('#autoMetadata').checked,autoFinishMinutes:$('#autoFinish').value};
            const credentials={cloud_name:$('#c_cloud').value.trim(),api_key:$('#c_key').value.trim(),api_secret:$('#c_secret').value.trim()};
            const r=await api('/api/settings',{settings,credentials});msgEl.textContent='Saved ✓'+(r.creds.ok?'':' · keys still missing');$('#c_key').value='';$('#c_secret').value='';toast('Settings saved','good')}catch(e){msgEl.textContent=e.message;toast(e.message,'bad')}poll()});
           $('#addBtn').onclick=async()=>{const m=$('#addMsg');try{$('#addBtn').disabled=true;const r=await api('/api/prompts',{text:$('#ptext').value,type:document.querySelector('input[name=ptype]:checked').value,copies:$('#copies').value});
@@ -4438,6 +4566,7 @@ jobs:
           });
           process.on('SIGTERM', () => finish('runner stopped'));
           process.on('SIGINT', () => finish('interrupted'));
+
           STUDIO_EOF
           node --check studio_server.mjs && echo "✅ studio_server.mjs OK ($(wc -l < studio_server.mjs) lines)"
 
