@@ -2969,7 +2969,7 @@ jobs:
             amoled: 'Optimised for AMOLED: true black background areas and bright isolated highlights.',
             lcd: 'Optimised for LCD: keep shadows slightly lifted so detail survives on bright panels.'
           };
-          const BASE_RULES = 'Portrait 9:16 mobile wallpaper, vertical composition, keep the upper third clean for the clock and keep safe margins. No text, numbers, labels, signatures or watermarks. No phone frame, device mockup, border, collage or contact sheet. No humans, no copyrighted characters, franchises, brands or logos. Still image only.';
+          const BASE_RULES = 'Portrait 9:16 mobile wallpaper, vertical composition, keep the upper third clean for the clock and keep safe margins. Keep the whole subject inside the frame with clear empty margin on the left, right and bottom: no part of the subject may touch or run past the frame edges. No text, numbers, labels, signatures or watermarks. No phone frame, device mockup, border, collage or contact sheet. No humans, no copyrighted characters, franchises, brands or logos. Still image only.';
           const BASE_RULES_FREE = 'Clean composition with safe margins. No text, numbers, labels, signatures or watermarks. No phone frame, device mockup, border, collage or contact sheet. No humans, no copyrighted characters, franchises, brands or logos. Still image only.';
           const STRENGTH = {
             subtle: { lock: 'Keep the same subject, composition, geometry, materials and style as the reference image [1]. Preserve the subject identity.', push: 'Apply the state described below so it is clearly noticeable when compared side by side with the reference.' },
@@ -3104,6 +3104,7 @@ jobs:
           const state = {
             settings: {
               model: 'gpt-image-2.5-sunburst', res: '2K', ratio: '9:16', boost: 'vivid', display: 'any', strength: 'clear', upscale: true,
+              crop: 'center',         // c_fill gravity: center (deterministic, all frames aligned) or smart (g_auto, content-aware but shifts per frame)
               sceneVary: 'on',        // 24-Hour sets: same scene + subject, but each hour gets its own sky / weather / atmosphere pack
               concurrency: 2,
               targetAccount: (FIREBASE_DB_MAP[(process.env.TARGET_ACCOUNT || '').trim().toLowerCase()] ? (process.env.TARGET_ACCOUNT || '').trim().toLowerCase() : 'zedge_2'),   // never "all_accounts" here
@@ -3181,10 +3182,34 @@ jobs:
             if (!asset || !asset.storage || !asset.storage.asset_id) throw new Error('Cloudinary returned no managed asset.');
             return asset;
           }
-          function derivedUrl(storage, upscale, ratio) {
+          // Ask Cloudinary for the real pixel size of the generated asset (fl_getinfo returns JSON, no image
+          // download). The model is asked for 9:16 and normally delivers it, so we must NOT crop blindly.
+          async function sourceSize(storage) {
+            if (Number(storage.width) > 0 && Number(storage.height) > 0) return { w: Number(storage.width), h: Number(storage.height) };
+            const v = storage.version ? `v${storage.version}/` : '';
+            try {
+              const r = await fetch(`${DELIVERY_BASE}/${creds.cloud_name}/image/upload/fl_getinfo/${v}${storage.public_id}.jpg`);
+              if (!r.ok) return null;
+              const j = await r.json();
+              const i = (j && (j.input || j.output)) || {};
+              return (i.width && i.height) ? { w: Number(i.width), h: Number(i.height) } : null;
+            } catch { return null; }
+          }
+          // Build the delivery transform from the asset's ACTUAL aspect ratio:
+          //   • already the target ratio (±2%)  → c_scale: resize only, nothing is cut off
+          //   • genuinely different             → c_fill with a fixed gravity (g_center by default), so every
+          //                                       frame of the set loses the same strip and stays aligned.
+          // g_auto used to decide the crop window per image from saliency, which is why one frame lost the
+          // left side and the next one the right side.
+          function derivedUrl(storage, upscale, ratio, crop, src) {
             const [w, h] = RATIOS[ratio] || RATIOS['9:16'];
             const v = storage.version ? `v${storage.version}/` : '';
-            return `${DELIVERY_BASE}/${creds.cloud_name}/image/upload/${upscale ? 'e_upscale/' : 'e_sharpen:60/'}c_fill,g_auto,w_${w},h_${h}/q_100/${v}${storage.public_id}.jpg`;
+            const pre = upscale ? 'e_upscale/' : 'e_sharpen:60/';
+            const tgtAr = w / h;
+            let tx;
+            if (src && src.w && src.h && Math.abs(src.w / src.h - tgtAr) / tgtAr <= 0.02) tx = `c_scale,w_${w},h_${h}`;
+            else tx = `c_fill,${crop === 'smart' ? 'g_auto' : 'g_center'},w_${w},h_${h}`;
+            return `${DELIVERY_BASE}/${creds.cloud_name}/image/upload/${pre}${tx}/q_100/${v}${storage.public_id}.jpg`;
           }
           // Derived (e_upscale) assets answer 423 while Cloudinary renders them — retry.
           async function downloadDerived(url) {
@@ -3211,7 +3236,7 @@ jobs:
             const folder = `${pad2(index)}_${slug(concept)}_${type}`;
             const item = {
               id: nextId++, index, type, concept, prompt: o.prompt, folder,
-              settings: { model: st.model, res: st.res, ratio: st.ratio, boost: st.boost, display: st.display, strength: st.strength, upscale: !!st.upscale, sceneVary: st.sceneVary === 'off' ? 'off' : 'on' },
+              settings: { model: st.model, res: st.res, ratio: st.ratio, boost: st.boost, display: st.display, strength: st.strength, upscale: !!st.upscale, crop: st.crop === 'smart' ? 'smart' : 'center', sceneVary: st.sceneVary === 'off' ? 'off' : 'on' },
               scenePlan: null,
               status: 'queued', anchorId: null, error: '',
               frames: def.frames.map(f => ({ file: f.file, slot: f.slot, name: f.name, status: 'queued', url: '', localPath: '', size: 0, error: '', attempts: 0 })),
@@ -3256,7 +3281,19 @@ jobs:
                 if (!isAnchor) payload.reference_images = [{ source_type: 'managed_asset', asset_id: item.anchorId }];
                 const asset = await cloudinaryGenerate(isAnchor ? 'text_to_image' : 'image_to_image', payload);
                 if (isAnchor) item.anchorId = asset.storage.asset_id;
-                const url = derivedUrl(asset.storage, st.upscale, st.ratio);
+                const src = await sourceSize(asset.storage);
+                const url = derivedUrl(asset.storage, st.upscale, st.ratio, st.crop, src);
+                if (src) {
+                  const [tw, th] = RATIOS[st.ratio] || RATIOS['9:16'];
+                  const srcAr = src.w / src.h, tgtAr = tw / th;
+                  const off = Math.abs(srcAr - tgtAr) / tgtAr;
+                  if (off <= 0.02) { if (isAnchor) log(`📐 ${item.folder}: model delivered ${src.w}×${src.h} (${st.ratio}) — resized only, nothing cropped`); }
+                  else {
+                    const wide = srcAr > tgtAr;
+                    const lost = 1 - (wide ? tgtAr / srcAr : srcAr / tgtAr);
+                    log(`✂️ ${item.folder}/${fdef.file}: model returned ${src.w}×${src.h}, so ${Math.round(lost * 100)}% of the ${wide ? 'width' : 'height'} must be cropped to reach ${st.ratio} (centre crop — same strip on every frame).`);
+                  }
+                }
                 const buf = await downloadDerived(url);
                 const dir = path.join(OUT_DIR, item.folder); fs.mkdirSync(dir, { recursive: true });
                 const localPath = path.join(dir, fdef.file);
@@ -3898,6 +3935,7 @@ jobs:
               if (RATIOS[String(it.ratio || '')]) settings.ratio = String(it.ratio);
               if (typeof it.upscale === 'boolean') settings.upscale = it.upscale;
               if (it.sceneVary === 'on' || it.sceneVary === 'off') settings.sceneVary = it.sceneVary;
+              if (it.crop === 'center' || it.crop === 'smart') settings.crop = it.crop;
               const concept = String(it.concept || it.name || it.title || '').trim();
               for (let c = 0; c < copies; c++) out.push({ type, prompt, concept: copies > 1 && concept ? `${concept} v${c + 1}` : concept, settings });
             });
@@ -3955,6 +3993,7 @@ jobs:
                 if (STRENGTH[s.strength]) state.settings.strength = s.strength;
                 if (typeof s.upscale === 'boolean') state.settings.upscale = s.upscale;
                 if (s.sceneVary === 'on' || s.sceneVary === 'off') state.settings.sceneVary = s.sceneVary;
+                if (s.crop === 'center' || s.crop === 'smart') state.settings.crop = s.crop;
                 if (s.concurrency) state.settings.concurrency = Math.max(1, Math.min(4, parseInt(s.concurrency, 10) || 1));
                 if (s.targetAccount && (FIREBASE_DB_MAP[s.targetAccount] || s.targetAccount === SPREAD)) state.settings.targetAccount = s.targetAccount;
                 if (Array.isArray(s.spreadPool)) { const pool = [...new Set(s.spreadPool.filter(a => FIREBASE_DB_MAP[a]))]; if (pool.length) state.settings.spreadPool = pool; }
@@ -4344,6 +4383,10 @@ jobs:
              <div style="margin-top:14px">
               <label class="sw"><span class="t">AI upscale before crop<small><code>e_upscale</code> → 1620 × 2880 · slower but sharper</small></span><input type="checkbox" id="upscale"><span class="k"></span></label>
              </div>
+             <div style="margin-top:12px">
+              <label class="l">Crop</label><select id="crop"><option value="center">Centre crop · same on every frame (recommended)</option><option value="smart">Smart crop <code>g_auto</code> · content‑aware, can shift per frame</option></select>
+              <p class="lead" style="margin-top:6px">The studio now measures what the model actually delivered: if it is already the requested ratio, the frame is only resized and <b>nothing is cut off</b>. A crop is used only when the ratio really differs — centre keeps the same strip on every frame of a set, while smart <code>g_auto</code> picks a different window per image (that is what shifted the subject left on one frame and right on the next).</p>
+             </div>
              <div class="foot"><button class="btn pri" data-save>Save defaults</button><span class="hint" style="margin:0" id="saveMsg1"></span></div>
             </div>
             <div class="pane" id="pDist">
@@ -4464,7 +4507,7 @@ jobs:
            $('#ratio').innerHTML=S.ratios.map(r=>\`<option\${r===s.ratio?' selected':''}>\${r}</option>\`).join('');
            $('#target').innerHTML=S.accounts.map(a=>\`<option value="\${a}"\${a===s.targetAccount?' selected':''}>\${a==='spread'?'spread — each item to a different account':a}</option>\`).join('');
            $('#spreadPool').innerHTML=accts().map(a=>\`<label class="chip" style="cursor:pointer;display:inline-flex;gap:6px;align-items:center"><input type="checkbox" class="sp" value="\${a}"\${(s.spreadPool||accts()).includes(a)?' checked':''}>\${a} <b style="color:var(--faint)">\${(S.spreadCounts||{})[a]??0}</b></label>\`).join('');$('#spreadBox').style.display=$('#target').value==='spread'?'':'none';
-           $('#res').value=s.res;$('#concurrency').value=s.concurrency;$('#boost').value=s.boost;$('#display').value=s.display;$('#strength').value=s.strength;$('#sceneVary').value=s.sceneVary||'on';$('#upscale').checked=s.upscale;
+           $('#res').value=s.res;$('#concurrency').value=s.concurrency;$('#boost').value=s.boost;$('#display').value=s.display;$('#strength').value=s.strength;$('#sceneVary').value=s.sceneVary||'on';$('#upscale').checked=s.upscale;$('#crop').value=s.crop||'center';
            $('#queuePath').value=s.queuePath;$('#autoDistribute').checked=s.autoDistribute;$('#requireMetadata').checked=s.requireMetadata;$('#metaAutoRetry').value=String(s.metaAutoRetry??4);$('#runMetadata').checked=s.runMetadata;$('#autoMetadata').checked=s.autoMetadata;$('#autoFinish').value=s.autoFinishMinutes;$('#c_cloud').value=S.creds.cloud_name||''}
 
           function itemCard(i){
@@ -4547,7 +4590,7 @@ jobs:
           $('#finishBtn').onclick=async()=>{const nd=S.items.filter(i=>i.status==='done'&&!i.distributed.length).length,busy=S.items.filter(i=>i.status==='running'||i.status==='queued').length;
            if(!confirm(\`Finish the session?\${busy?\`\\n• \${busy} item(s) still queued/rendering will be abandoned.\`:''}\${nd?\`\\n• \${nd} completed item(s) are NOT distributed (they stay in the ZIP artifact).\`:''}\${S.settings.runMetadata&&S.totals.records>S.totals.metaReady?'\\n• The final Gemini‑Web metadata pass runs next for records still missing metadata.':''}\`))return;await api('/api/finish');toast('Finishing session…');poll()};
           $$('[data-save]').forEach(b=>b.onclick=async()=>{const pane=b.closest('.pane'),msgEl=pane.querySelector('[id^=saveMsg]');try{
-           const settings={model:$('#model').value,res:$('#res').value,ratio:$('#ratio').value,boost:$('#boost').value,display:$('#display').value,strength:$('#strength').value,sceneVary:$('#sceneVary').value,upscale:$('#upscale').checked,concurrency:$('#concurrency').value,targetAccount:$('#target').value,spreadPool:$$('#spreadPool .sp:checked').map(x=>x.value),queuePath:$('#queuePath').value,autoDistribute:$('#autoDistribute').checked,requireMetadata:$('#requireMetadata').checked,metaAutoRetry:$('#metaAutoRetry').value,runMetadata:$('#runMetadata').checked,autoMetadata:$('#autoMetadata').checked,autoFinishMinutes:$('#autoFinish').value};
+           const settings={model:$('#model').value,res:$('#res').value,ratio:$('#ratio').value,boost:$('#boost').value,display:$('#display').value,strength:$('#strength').value,sceneVary:$('#sceneVary').value,upscale:$('#upscale').checked,crop:$('#crop').value,concurrency:$('#concurrency').value,targetAccount:$('#target').value,spreadPool:$$('#spreadPool .sp:checked').map(x=>x.value),queuePath:$('#queuePath').value,autoDistribute:$('#autoDistribute').checked,requireMetadata:$('#requireMetadata').checked,metaAutoRetry:$('#metaAutoRetry').value,runMetadata:$('#runMetadata').checked,autoMetadata:$('#autoMetadata').checked,autoFinishMinutes:$('#autoFinish').value};
            const credentials={cloud_name:$('#c_cloud').value.trim(),api_key:$('#c_key').value.trim(),api_secret:$('#c_secret').value.trim()};
            const r=await api('/api/settings',{settings,credentials});msgEl.textContent='Saved ✓'+(r.creds.ok?'':' · keys still missing');$('#c_key').value='';$('#c_secret').value='';toast('Settings saved','good')}catch(e){msgEl.textContent=e.message;toast(e.message,'bad')}poll()});
           $('#addBtn').onclick=async()=>{const m=$('#addMsg');try{$('#addBtn').disabled=true;const r=await api('/api/prompts',{text:$('#ptext').value,type:document.querySelector('input[name=ptype]:checked').value,copies:$('#copies').value});
