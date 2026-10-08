@@ -437,7 +437,7 @@ jobs:
             return candidates;
           }
 
-          // ─── ZEDGE CONTENT POLICY GUARD (v21) ─────────────────────────────────────
+          // ���── ZEDGE CONTENT POLICY GUARD (v21) ─────────────────────────────────────
           // Enforces Zedge's Content Guidelines on everything this workflow produces:
           // original-only (no artists, songs, characters, brands, logos, celebrities), no
           // adult / hate / violence / drugs / illegal content, accurate non-promotional
@@ -623,7 +623,33 @@ jobs:
             await geminiPage.keyboard.press('Enter');
             console.log(`    ⌨️  Submitted via Enter key`);
 
-            const deadline = Date.now() + 90000;
+            // v27.17 FIX: Enter is swallowed while an image attachment is still uploading, so the prompt
+            // was never sent and we waited the full timeout for a reply that could not come. Confirm the
+            // composer actually emptied; if not, press Enter again and finally click the Send button.
+            const composerText = () => geminiPage.evaluate(() => {
+              const el = document.querySelector('div.ql-editor[contenteditable="true"]');
+              return el ? (el.innerText || '').trim() : '';
+            }).catch(() => '');
+            let sent = false;
+            for (let attempt = 1; attempt <= 3 && !sent; attempt++) {
+              const until = Date.now() + 8000;
+              while (Date.now() < until) {
+                await sleep(500);
+                if ((await getResponseCount()) > initialCount) { sent = true; break; }
+                const left = await composerText();
+                if (!left || left.length < Math.min(40, promptText.length / 4)) { sent = true; break; }
+              }
+              if (sent) break;
+              console.warn(`    ⚠️  Prompt still sitting in the composer (attempt ${attempt}) — re-sending…`);
+              if (attempt === 2) {
+                const sendSels = ['button[aria-label*="Send" i]', 'button[mattooltip*="Send" i]', 'button.send-button', 'button:has(mat-icon[fonticon="send"])'];
+                for (const s of sendSels) { try { if (await geminiPage.isVisible(s)) { await geminiPage.click(s, { force: true }); break; } } catch (_) {} }
+              } else {
+                try { await geminiPage.keyboard.press('Enter'); } catch (_) {}
+              }
+            }
+
+            const deadline = Date.now() + 180000;
             // v27.10: a reply is only accepted once it contains the closing tag of the LAST template section
             // (opts.completeWhen). Before, a 3 s pause while Gemini was still streaming was mistaken for a
             // finished answer -> half a template got parsed -> the audio prompt silently fell back to
@@ -631,13 +657,13 @@ jobs:
             // v27.16 SPEED: poll 4x faster and accept the reply the moment the closing tag of the LAST
             // section is on screen (POLICY is always last), instead of burning 2 extra stable ticks.
             const completeRe = opts.completeWhen || null;
-            const softDeadline = Date.now() + 45000;   // after this a stable partial reply is accepted (the parser validates it)
+            const softDeadline = Date.now() + 90000;   // after this a stable partial reply is accepted (the parser validates it)
             let responseText = '';
             let lastSeen = '';
             let stableCount = 0;
 
             while (Date.now() < deadline) {
-              await sleep(400);
+              await sleep(700);
               const currentCount = await getResponseCount();
               if (currentCount <= initialCount) continue;
 
@@ -673,7 +699,7 @@ jobs:
               }
             }
 
-            if (!responseText) throw new Error('Gemini web timeout: no response within 90s');
+            if (!responseText) throw new Error(`Gemini web timeout: no response within 180s${sent ? '' : ' (the prompt could not be submitted — attachment may still be uploading)'}`);
             console.log(`    ✅ Got response (${responseText.length} chars)`);
             return responseText;
           }
@@ -919,6 +945,7 @@ jobs:
             await geminiPage.goto('https://gemini.google.com/app/new', { waitUntil: 'domcontentloaded', timeout: 30000 });
             // v27.16 SPEED: wait for the composer to actually exist instead of a blind 3 s sleep.
             await geminiPage.waitForSelector('div.ql-editor[contenteditable="true"], rich-textarea [contenteditable="true"]', { timeout: 30000 }).catch(() => {});
+            await sleep(1200);   // v27.17: let the composer finish hydrating before typing / attaching
 
             // Dismiss any overlays / cookie banners / "What's new" modals.
             // v27.16 SPEED: the consent / welcome dialogs only appear on the FIRST chat of a session,
@@ -958,7 +985,22 @@ jobs:
             if (!uploaded) {
               throw new Error('Could not attach image to Gemini after all strategies.');
             }
-            await sleep(400);
+            // v27.17 FIX: Gemini ignores Enter while the attachment is still uploading. Wait until the
+            // upload spinner is gone (up to 45 s) instead of a fixed sleep — this is what caused the
+            // "no response within 90s" timeouts.
+            {
+              const upDeadline = Date.now() + 45000;
+              let ready = false;
+              while (Date.now() < upDeadline) {
+                const busy = await geminiPage.evaluate(() => !!document.querySelector(
+                  'upload-progress-thumbnail .mat-mdc-progress-spinner, [class*="upload-progress"] mat-progress-bar, mat-progress-bar, [class*="uploading" i]'
+                )).catch(() => false);
+                if (!busy && await hasImageAttached(geminiPage)) { ready = true; break; }
+                await sleep(700);
+              }
+              if (!ready) console.warn('    ⚠️  Attachment still looks busy after 45 s — sending anyway');
+              await sleep(800);
+            }
 
             // Build the metadata prompt (content-kind aware: wallpaper / set / video)
             const validCategories = VALID_IMG_CATS.filter(c => c !== 'OTHER').join(', ');
