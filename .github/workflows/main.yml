@@ -437,7 +437,7 @@ jobs:
             return candidates;
           }
 
-          // ���── ZEDGE CONTENT POLICY GUARD (v21) ─────────────────────────────────────
+          // �����── ZEDGE CONTENT POLICY GUARD (v21) ─────────────────────────────────────
           // Enforces Zedge's Content Guidelines on everything this workflow produces:
           // original-only (no artists, songs, characters, brands, logos, celebrities), no
           // adult / hate / violence / drugs / illegal content, accurate non-promotional
@@ -662,44 +662,122 @@ jobs:
             let lastSeen = '';
             let stableCount = 0;
 
+            // v27.18 FIX: never gate on a response-container COUNT and never depend on one selector set.
+            // Gemini's DOM changes constantly; when none of the old selectors matched, the reply was on
+            // screen but we read nothing and waited out the whole timeout. Now we read the newest reply
+            // from a wide selector list and fall back to the raw page text — all we need is the
+            // [TITLE]…[/POLICY] block, which we take from the LAST [TITLE] on the page (the prompt echo
+            // sits above it and is filtered out by its literal template markers).
+            // v27.19: selectors confirmed against the live Gemini DOM:
+            //   model-response > ... > message-content > div.markdown[id^="model-response-message-content"]
+            //   streaming flag  = that div's aria-busy="true"
+            //   quota/limit UI  = freemium-file-upload-quota-exceeded-disclaimer (non-empty)
+            const readState = () => geminiPage.evaluate(() => {
+              const pick = () => {
+                const sels = [
+                  'message-content div[id^="model-response-message-content"]',
+                  'div[id^="model-response-message-content"]',
+                  'model-response message-content .markdown',
+                  'model-response .model-response-text',
+                  'model-response message-content',
+                  'model-response',
+                  'div[id^="response-message-content"]',
+                  '.response-content'
+                ];
+                for (const s of sels) {
+                  const list = document.querySelectorAll(s);
+                  if (!list.length) continue;
+                  const el = list[list.length - 1];
+                  const t = (el.innerText || el.textContent || '').trim();
+                  if (t) return { el: el, text: t };
+                }
+                return { el: null, text: (document.body.innerText || '').trim() };
+              };
+              const found = pick();
+              let busy = false;
+              if (found.el) {
+                const flagged = found.el.closest('[aria-busy]') || found.el.querySelector('[aria-busy]');
+                busy = !!(flagged && flagged.getAttribute('aria-busy') === 'true');
+              }
+              if (!busy) {
+                const ps = document.querySelector('.response-container-header-processing-state');
+                busy = !!(ps && (ps.innerText || '').trim());
+              }
+              let quota = '';
+              document.querySelectorAll('freemium-file-upload-quota-exceeded-disclaimer').forEach(d => {
+                const t = (d.innerText || '').trim();
+                if (t) quota = t;
+              });
+              return { text: found.text, busy: busy, quota: quota };
+            }).catch(() => ({ text: '', busy: false, quota: '' }));
+
+            const readLatest = async () => (await readState()).text;
+
+            // Slice from the LAST [TITLE] marker; skip it while it is still the prompt's own template.
+            const taggedBlock = s => {
+              const str = String(s || '');
+              let idx = -1, m; const re = /\[\s*TITLE\s*\]/gi;
+              while ((m = re.exec(str)) !== null) idx = m.index;
+              if (idx < 0) return '';
+              const block = str.slice(idx).trim();
+              if (/Format your ENTIRE response/i.test(block)) return '';
+              if (/OK or FLAG: reason/i.test(block)) return '';          // the template echoed in our prompt
+              if (/^\[\s*TITLE\s*\]\s*(\.{3}|\u2026)/i.test(block)) return '';
+              return block;
+            };
+
+            let sawAnyText = false;
+            let sawReply = false;
             while (Date.now() < deadline) {
               await sleep(700);
-              const currentCount = await getResponseCount();
-              if (currentCount <= initialCount) continue;
+              const st = await readState();
+              if (st.quota) throw new Error(`Gemini refused the upload (file-upload quota): ${st.quota.slice(0, 160)}`);
+              const raw = st.text;
+              if (!raw) continue;
+              sawAnyText = true;
 
-              const latestText = await geminiPage.evaluate(() => {
-                const selectors = [
-                  'div[id^="model-response-message-content"]',
-                  'div[id^="response-message-content"]',
-                  '.response-content p',
-                  'message-content',
-                  'div.message-content'
-                ];
-                const allMatching = [];
-                for (const sel of selectors) {
-                  document.querySelectorAll(sel).forEach(el => allMatching.push(el));
-                }
-                if (allMatching.length === 0) return '';
-                allMatching.sort((a, b) => (a.compareDocumentPosition(b) & 4) ? -1 : 1);
-                const lastEl = allMatching[allMatching.length - 1];
-                return lastEl ? (lastEl.innerText || lastEl.textContent || '').trim() : '';
-              }).catch(() => '');
-
-              if (!latestText) continue;
-
+              const block = taggedBlock(raw);
               // Closing tag of the last section is present -> the answer is complete, stop waiting.
-              if (completeRe && completeRe.test(latestText)) { responseText = latestText; break; }
+              if (block && completeRe && completeRe.test(block)) { responseText = block; break; }
+              if (block) sawReply = true;
 
-              if (latestText === lastSeen) {
+              const latestText = block || (completeRe ? '' : raw);
+
+              // aria-busy="false" on the response markdown means Gemini finished streaming.
+              // Accept what is on screen then (off-format replies are rescued by the parser's label
+              // fallback) instead of burning the whole timeout waiting for a tag Gemini never emits.
+              if (!st.busy && raw.length > 20) {
+                if (raw === lastSeen) {
+                  stableCount++;
+                  if (stableCount >= 2) { responseText = latestText || raw; break; }
+                } else {
+                  lastSeen = raw;
+                  stableCount = 0;
+                }
+                continue;
+              }
+
+              if (latestText && latestText === lastSeen) {
                 stableCount++;
                 if (stableCount >= 3 && (!completeRe || Date.now() > softDeadline)) { responseText = latestText; break; }
-              } else {
+              } else if (latestText) {
                 lastSeen = latestText;
                 stableCount = 0;
               }
             }
 
-            if (!responseText) throw new Error(`Gemini web timeout: no response within 180s${sent ? '' : ' (the prompt could not be submitted — attachment may still be uploading)'}`);
+            // Diagnostics so a future failure says WHY instead of just "timeout".
+            if (!responseText) {
+              try {
+                const shot = `/tmp/gemini_no_reply_${Date.now()}.png`;
+                await geminiPage.screenshot({ path: shot, fullPage: false });
+                console.warn(`    📸 No reply captured — screenshot: ${shot}`);
+                const dump = (await readLatest()).slice(-1200);
+                console.warn(`    🧾 Last page text seen (tail):\n${dump}`);
+              } catch (_) {}
+            }
+
+            if (!responseText) throw new Error(`Gemini web timeout: no response within 180s${sent ? (sawReply ? ' (a reply was on screen but never finished streaming)' : sawAnyText ? ' (page text was readable but contained no [TITLE] block — Gemini may have refused or answered off-format)' : ' (could not read any page text)') : ' (the prompt could not be submitted — attachment may still be uploading)'}`);
             console.log(`    ✅ Got response (${responseText.length} chars)`);
             return responseText;
           }
@@ -1040,10 +1118,31 @@ jobs:
               return /^(\.{3}|\u2026)$/.test(rest) ? '' : rest;   // the literal "..." template placeholder counts as missing
             };
 
-            const title       = cleanTitle(getTagValue(responseText, 'TITLE'))       || `Image ${key.slice(0, 8)}`;
-            const tags        = cleanKeywords(getTagValue(responseText, 'KEYWORDS'));
-            const category    = cleanCategory(getTagValue(responseText, 'CATEGORY'));
-            const description = cleanDescription(getTagValue(responseText, 'DESCRIPTION'));
+            // v27.19: Gemini often answers in its own markdown layout ("**Title:** ...", "**Tags:**"
+            // + a bullet list of #hashtags) instead of the [TAG] template. Fall back to those labels
+            // before giving up on a field, so an off-format reply is still usable.
+            const getLabelValue = (text, labels) => {
+              for (const label of labels) {
+                const re = new RegExp('(?:^|\\n)\\s*\\**\\s*' + label + '\\s*\\**\\s*:\\s*\\**([\\s\\S]*?)(?=\\n\\s*\\**\\s*(?:Title|Tags|Keywords|Hashtags|Category|Description|Summary|Author|Policy)\\s*\\**\\s*:|$)', 'i');
+                const m = text.match(re);
+                if (!m) continue;
+                const val = m[1]
+                  .replace(/\*\*/g, '')
+                  .split('\n')
+                  .map(l => l.replace(/^\s*[-*\u2022]\s*/, '').trim())
+                  .filter(Boolean)
+                  .join(', ')
+                  .trim();
+                if (val) return val;
+              }
+              return '';
+            };
+            const pickValue = (tag, labels) => getTagValue(responseText, tag) || getLabelValue(responseText, labels);
+
+            const title       = cleanTitle(pickValue('TITLE', ['Title']))              || `Image ${key.slice(0, 8)}`;
+            const tags        = cleanKeywords(pickValue('KEYWORDS', ['Tags', 'Keywords', 'Hashtags']));
+            const category    = cleanCategory(pickValue('CATEGORY', ['Category']));
+            const description = cleanDescription(pickValue('DESCRIPTION', ['Description', 'Summary']));
 
             console.log(`  ✨ Title    : "${title}"`);
             console.log(`  🏷️  Tags     : ${tags}`);
@@ -1327,7 +1426,7 @@ jobs:
             }
           }
 
-          // ─── SHUTDOWN ─────────────────────────────────────────────────────────────
+          // ─── SHUTDOWN ────────────────────────────────────────────���────────────────
           if (geminiPage) {
             try {
               const videoPath = await geminiPage.video()?.path();
