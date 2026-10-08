@@ -2983,6 +2983,12 @@ jobs:
           // identical location, identical camera. What changes is the sky, the light, the shadows,
           // the weather/atmosphere and the lights that switch on. Each item draws its own atmosphere
           // pack (seeded by the folder) so two similar prompts do not produce identical-looking sets.
+          // v27.15 - 1:1 2000x2000 companion for foldables / tablets: SAME artwork, only the framing changes.
+          const SQUARE_COMPANION = 'SQUARE COMPANION OF THE SAME WALLPAPER (1:1, for foldable phones and tablets). '
+            + 'This is the SAME artwork as reference image [1], re-framed to a square canvas. Keep the identical subject, identical materials, identical colours, identical palette, identical lighting direction, identical mood and identical art style. '
+            + 'Only the framing changes: widen the scene sideways and extend the existing background naturally (outpaint) so the composition fills a square. '
+            + 'Do NOT stretch, squash, letterbox, pillarbox, mirror, tile or collage the portrait image. Do not add new objects, text, logos, borders, device frames or watermarks. '
+            + 'Keep the whole hero subject inside the frame with about 6% clear margin, keep the subject inside the central 85% of the square and keep the upper third calm so a clock stays readable. Still image only.';
           const TIME_LOCK = 'HARD CONSISTENCY RULE: this is the SAME scene as reference image [1], photographed later in the day. Keep the identical subject, identical materials and colours of the subject, identical location, identical background structures and horizon, identical camera angle, distance and composition. Do not move, resize, redesign or replace anything, and do not add or remove objects.';
           const TIME_PUSH = 'ONLY the time of day changes, and it must change unmistakably: sky colour and cloud state, direction, colour and hardness of the light, length and direction of the shadows, overall colour temperature, atmosphere, and which lights are switched on. Someone seeing the four frames side by side must instantly name the hour, while still recognising the very same place.';
           const SCENE_PACKS = {
@@ -3082,7 +3088,11 @@ jobs:
             'SINGLE': {
               contentType: 'WALLPAPER',
               design: '',
-              frames: [{ file: '01_wallpaper.jpg', slot: 'single', name: 'Wallpaper', instr: 'One standalone wallpaper. No variants, no time states, no energy states, no companion image.' }]
+              frames: [
+                { file: '01_wallpaper.jpg', slot: 'single', name: 'Wallpaper', instr: 'One standalone wallpaper. No variants, no time states, no energy states.' },
+                // v27.15 - optional 1:1 2000x2000 companion (Zedge "Add landscape/foldable wallpaper"). Never a set slot.
+                { file: '01_wallpaper-landscape.jpg', slot: 'landscape', name: 'Foldable 1:1', companion: true, instr: 'Square 1:1 re-frame of the same wallpaper for foldable phones and tablets.' }
+              ]
             }
           };
           const TYPE_ALIAS = { '24-HOUR': '24-HOUR', '24HOUR': '24-HOUR', '24': '24-HOUR', '24H': '24-HOUR', 'DAY': '24-HOUR', 'WALLPAPER24H': '24-HOUR', 'DUAL': 'DUAL', 'LOCKHOME': 'DUAL', 'WALLPAPERDUAL': 'DUAL', 'BATTERY': 'BATTERY', 'BAT': 'BATTERY', 'WALLPAPERBATTERY': 'BATTERY', 'SINGLE': 'SINGLE', 'ONE': 'SINGLE', 'WALLPAPER': 'SINGLE' };
@@ -3202,7 +3212,8 @@ jobs:
           // g_auto used to decide the crop window per image from saliency, which is why one frame lost the
           // left side and the next one the right side.
           function derivedUrl(storage, upscale, ratio, crop, src) {
-            const [w, h] = RATIOS[ratio] || RATIOS['9:16'];
+            // v27.15: 'SQ2000' = the 1:1 2000x2000 foldable/tablet companion of a SINGLE wallpaper
+            const [w, h] = ratio === 'SQ2000' ? [2000, 2000] : (RATIOS[ratio] || RATIOS['9:16']);
             const v = storage.version ? `v${storage.version}/` : '';
             const pre = upscale ? 'e_upscale/' : 'e_sharpen:60/';
             const tgtAr = w / h;
@@ -3239,7 +3250,7 @@ jobs:
               settings: { model: st.model, res: st.res, ratio: st.ratio, boost: st.boost, display: st.display, strength: st.strength, upscale: !!st.upscale, crop: st.crop === 'smart' ? 'smart' : 'center', sceneVary: st.sceneVary === 'off' ? 'off' : 'on' },
               scenePlan: null,
               status: 'queued', anchorId: null, error: '',
-              frames: def.frames.map(f => ({ file: f.file, slot: f.slot, name: f.name, status: 'queued', url: '', localPath: '', size: 0, error: '', attempts: 0 })),
+              frames: def.frames.map(f => ({ file: f.file, slot: f.slot, name: f.name, companion: !!f.companion, status: 'queued', url: '', localPath: '', size: 0, error: '', attempts: 0 })),
               distributed: [], distributeStatus: '', distributeError: '',
               // meta = Gemini-Web (or manual) Zedge metadata generated BEFORE distribution; metaStatus: '' | queued | running | done | held | failed | manual
               meta: null, metaStatus: '', metaError: '',
@@ -3258,8 +3269,14 @@ jobs:
             const rules = (item.type === 'SINGLE' && st.ratio !== '9:16') ? BASE_RULES_FREE : BASE_RULES;
             const S = STRENGTH[st.strength] || STRENGTH.clear;
             const is24 = item.type === '24-HOUR';
+            // v27.15 - the companion is always asked for as 1:1 and delivered as exactly 2000x2000
+            const isCompanion = !!fdef.companion;
+            const genRatio = isCompanion ? '1:1' : (st.ratio || '9:16');
+            const outRatio = isCompanion ? 'SQ2000' : (st.ratio || '9:16');
             const voidRule = is24 ? (fdef.slot === 'night' ? NO_VOID_NIGHT : NO_VOID) : '';
-            const buildPrompt = fix => { const atmo = (item.scenePlan && item.scenePlan[fdef.slot]) || ''; return (isAnchor
+            const buildPrompt = fix => { const atmo = (item.scenePlan && item.scenePlan[fdef.slot]) || '';
+              if (isCompanion) return [item.prompt ? 'Concept: ' + item.prompt : '', SQUARE_COMPANION, grade, fix].filter(Boolean).join('\n\n');
+              return (isAnchor
               ? [item.prompt, def.design, fdef.instr, atmo && 'ATMOSPHERE FOR THIS FRAME — ' + atmo, voidRule, grade, rules, fix]
               : [item.prompt ? 'Concept: ' + item.prompt : '', is24 ? TIME_LOCK : S.lock, is24 ? TIME_PUSH : S.push,
                  'STATE TO RENDER — ' + fdef.instr, atmo && 'ATMOSPHERE FOR THIS FRAME — ' + atmo, voidRule, NO_DUPE, grade, rules, fix]
@@ -3274,7 +3291,7 @@ jobs:
                 const payload = {
                   prompt,
                   model: { id: isAnchor ? base : editModel },
-                  image_size: { aspect_ratio: st.ratio || '9:16', resolution: st.res || '2K' },
+                  image_size: { aspect_ratio: genRatio, resolution: st.res || '2K' },
                   format: 'png',
                   target: { target_type: 'managed_asset', public_id: `zedge/${item.folder}/${fdef.file.replace(/\.jpg$/, '')}_${Date.now().toString(36)}` }
                 };
@@ -3282,16 +3299,16 @@ jobs:
                 const asset = await cloudinaryGenerate(isAnchor ? 'text_to_image' : 'image_to_image', payload);
                 if (isAnchor) item.anchorId = asset.storage.asset_id;
                 const src = await sourceSize(asset.storage);
-                const url = derivedUrl(asset.storage, st.upscale, st.ratio, st.crop, src);
+                const url = derivedUrl(asset.storage, st.upscale, outRatio, isCompanion ? 'center' : st.crop, src);
                 if (src) {
-                  const [tw, th] = RATIOS[st.ratio] || RATIOS['9:16'];
+                  const [tw, th] = outRatio === 'SQ2000' ? [2000, 2000] : (RATIOS[outRatio] || RATIOS['9:16']);
                   const srcAr = src.w / src.h, tgtAr = tw / th;
                   const off = Math.abs(srcAr - tgtAr) / tgtAr;
-                  if (off <= 0.02) { if (isAnchor) log(`📐 ${item.folder}: model delivered ${src.w}×${src.h} (${st.ratio}) — resized only, nothing cropped`); }
+                  if (off <= 0.02) { if (isAnchor) log(`📐 ${item.folder}: model delivered ${src.w}×${src.h} (${genRatio}) — resized only, nothing cropped`); }
                   else {
                     const wide = srcAr > tgtAr;
                     const lost = 1 - (wide ? tgtAr / srcAr : srcAr / tgtAr);
-                    log(`✂️ ${item.folder}/${fdef.file}: model returned ${src.w}×${src.h}, so ${Math.round(lost * 100)}% of the ${wide ? 'width' : 'height'} must be cropped to reach ${st.ratio} (centre crop — same strip on every frame).`);
+                    log(`✂️ ${item.folder}/${fdef.file}: model returned ${src.w}×${src.h}, so ${Math.round(lost * 100)}% of the ${wide ? 'width' : 'height'} must be cropped to reach ${isCompanion ? '1:1 2000×2000' : genRatio} (centre crop — same strip on every frame).`);
                   }
                 }
                 const buf = await downloadDerived(url);
@@ -3300,7 +3317,7 @@ jobs:
                 fs.writeFileSync(localPath, buf);
                 // Quality gate for time-of-day sets: the render must keep the scene (not a black void)
                 // and must actually look like a different hour than the morning anchor.
-                const qc = await qcFrame(item, f, fdef, localPath);
+                const qc = isCompanion ? null : await qcFrame(item, f, fdef, localPath);   // v27.15 - the square companion has no time/energy state to check
                 if (qc && attempt < 4) {
                   fixHint = qc.fix;
                   log(`🔍 ${item.folder}/${fdef.file}: ${qc.msg} — re-rendering`);
@@ -3393,6 +3410,13 @@ jobs:
               await Promise.all(item.frames.map((fr, i) => (i > 0 && fr.status !== 'done') ? generateFrame(item, i) : Promise.resolve(true)));
             }
             item.status = itemStatusFromFrames(item);
+            // v27.15 - the 1:1 foldable companion is OPTIONAL: if only it failed, the SINGLE still counts as done.
+            const bad = item.frames.filter(f => f.status !== 'done');
+            if (item.status !== 'done' && bad.length && bad.every(f => f.companion)) {
+              bad.forEach(f => { f.status = 'skipped'; f.error = f.error || 'companion skipped'; });
+              item.status = 'done';
+              log(`⚠️ ${item.folder}: the 1:1 foldable companion could not be rendered — the portrait wallpaper is kept (companion is optional)`);
+            }
             if (state.quotaHit && item.status !== 'done' && item.frames.some(f => f.status === 'queued')) { item.status = 'queued'; item.error = 'waiting — Cloudinary generation limit'; }
             else if (item.status !== 'done') item.error = item.frames.filter(f => f.status === 'failed').map(f => `${f.file}: ${f.error}`).join(' · ');
             lastActivity = Date.now(); saveState();
@@ -3488,6 +3512,7 @@ jobs:
             if (item.lockedAccount && item.lockedAccount !== target) throw new Error(`${item.folder} is locked to ${item.lockedAccount}.`);
             // 2) file-level lock: byte-identical frames must never exist in two records / two R2 folders
             for (const fr of item.frames) {
+              if (!fr.localPath) continue;                       // v27.15 - skipped optional companion
               const h = sha256(fs.readFileSync(fr.localPath));
               const hit = ledger[h];
               if (hit) throw new Error(`${item.folder}/${fr.file} is byte-identical to a file already uploaded to ${hit.account} (${hit.folder}, key ${hit.firebaseKey}). Refused — duplicate content across Zedge accounts.`);
@@ -3518,13 +3543,15 @@ jobs:
             for (const db of dbs) {
               try {
                 const files = {};
-                let first = null, totalSize = 0;
+                let first = null, totalSize = 0, landscape = null;   // v27.15 - landscape = 1:1 2000x2000 foldable companion
                 for (const fr of item.frames) {
+                  if (!fr.localPath) continue;                       // optional companion that was skipped
                   const buf = fs.readFileSync(fr.localPath);
                   const name = `${slug(item.concept)}_${fr.file}`;
                   const fileUrl = await uploadToR2(buf, name, db.name);   // R2 key = <db.name>/wallpaper/… — same account as the Firebase DB below
                   if (!new RegExp(`/${db.name.replace(/^zedge_?/i, 'zedge')}/wallpaper/`, 'i').test(fileUrl) && !/localhost|127\.0\.0\.1/.test(fileUrl)) throw new Error(`R2 returned a URL outside the ${db.name} folder (${fileUrl}) — aborted before writing Firebase`);
-                  const entry = { fileUrl, name, size: buf.length, type: 'image/jpeg', width: w, height: h, sha256: sha256(buf) };
+                  const entry = { fileUrl, name, size: buf.length, type: 'image/jpeg', width: fr.companion ? 2000 : w, height: fr.companion ? 2000 : h, sha256: sha256(buf) };
+                  if (fr.companion) { landscape = entry; log(`🖼️ [${db.name}] R2 ← ${item.folder}/${fr.file} (1:1 2000×2000 foldable companion)`); continue; }
                   files[fr.slot] = entry; totalSize += buf.length;
                   if (!first) first = entry;
                   log(`☁️ [${db.name}] R2 ← ${item.folder}/${fr.file}`);
@@ -3540,6 +3567,8 @@ jobs:
                   source: 'github-image-studio',
                   createdAt: Date.now()
                 };
+                // v27.15 - Zedge "Add landscape/foldable wallpaper": the bot, panel, app and desktop all read these two fields.
+                if (landscape) { base.landscapeUrl = landscape.fileUrl; base.landscapeName = landscape.name; base.landscapeSize = '2000x2000'; }
                 if (item.type !== 'SINGLE') { base.files = files; base.setName = item.concept; }
                 // Ringtone-style: the record already carries title / tags / category / description / policyCheck,
                 // so the Zedge bot can upload it immediately (no "metadata missing" skip). Policy-held items are
@@ -3547,7 +3576,7 @@ jobs:
                 const mf = metaFields(item);
                 if (mf) Object.assign(base, mf);
                 const key = await firebasePush(db.url, queuePath, base);
-                for (const e of Object.values(files)) ledger[e.sha256] = { account: db.name, firebaseKey: key, folder: item.folder, file: e.name, at: Date.now() };
+                for (const e of [...Object.values(files), ...(landscape ? [landscape] : [])]) ledger[e.sha256] = { account: db.name, firebaseKey: key, folder: item.folder, file: e.name, at: Date.now() };
                 saveLedger();
                 const snap = mf ? { title: base.title, tags: base.tags, category: base.category, description: base.description, policyCheck: base.policyCheck, policyFlag: base.policyFlag, status: base.status, metadataGeneratedAt: base.metadataGeneratedAt, fetchedAt: Date.now() } : {};
                 item.distributed.push({ dbName: db.name, key, at: Date.now(), meta: snap });
@@ -4107,16 +4136,16 @@ jobs:
           <style>
           :root{--bg:#0a0d13;--bg2:#0e1219;--surface:#131822;--raised:#1a2130;--line:rgba(255,255,255,.09);--line2:rgba(255,255,255,.16);--txt:#f3f5f9;--muted:rgba(255,255,255,.62);--faint:rgba(255,255,255,.4);
           --acc:#6d8cff;--acc2:#38d6ff;--grad:linear-gradient(135deg,#6d8cff 0%,#38d6ff 100%);--ok:#3ecf8e;--warn:#f5b63d;--err:#ff6b6b;--violet:#a78bfa;--r:12px;--r2:8px}
-          *{box-sizing:border-box}html{scroll-behavior:smooth}
+          *{box-sizing:border-box}html{scroll-behavior:auto}
           body{margin:0;font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,Helvetica,Arial,sans-serif;background:var(--bg);color:var(--txt);-webkit-font-smoothing:antialiased;
-          background-image:radial-gradient(1200px 600px at 10% -10%,rgba(109,140,255,.14),transparent 60%),radial-gradient(900px 500px at 100% 0%,rgba(56,214,255,.10),transparent 60%);background-attachment:fixed}
+          }
           a{color:var(--acc2)}button{font:inherit}code,kbd{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;background:rgba(255,255,255,.07);padding:1px 6px;border-radius:5px;color:#cfd6e4}
           ::selection{background:rgba(109,140,255,.35)}
           /* ─── header ─── */
-          .top{position:sticky;top:0;z-index:20;backdrop-filter:blur(14px);background:rgba(10,13,19,.72);border-bottom:1px solid var(--line)}
+          .top{position:sticky;top:0;z-index:20;background:#0a0d13;border-bottom:1px solid var(--line)}
           .top .in{max-width:1560px;margin:0 auto;padding:12px 24px;display:flex;align-items:center;gap:20px;flex-wrap:wrap}
           .brand{display:flex;align-items:center;gap:12px;margin-right:auto}
-          .logo{width:38px;height:38px;border-radius:11px;background:#f2f1e6;display:grid;place-items:center;box-shadow:0 8px 24px rgba(255,69,0,.28),0 0 0 1px rgba(255,255,255,.08);position:relative;overflow:hidden}
+          .logo{width:38px;height:38px;border-radius:11px;background:#f2f1e6;display:grid;place-items:center;position:relative;overflow:hidden}
           .logo img{width:38px;height:38px;display:block;border-radius:11px}
           .brand h1{margin:0;font-size:17px;font-weight:700;letter-spacing:-.01em;line-height:1.15}
           .brand small{display:block;font-size:12px;color:var(--muted);font-weight:500}
@@ -4146,15 +4175,14 @@ jobs:
           .wrap{max-width:1560px;margin:0 auto;padding:20px 24px 80px;display:grid;grid-template-columns:400px minmax(0,1fr);gap:20px;align-items:start}
           @media(max-width:1040px){.wrap{grid-template-columns:1fr}.side{position:static!important}}
           .side{position:sticky;top:78px;display:flex;flex-direction:column;gap:16px}
-          .card{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);box-shadow:0 1px 2px rgba(0,0,0,.2),0 12px 40px rgba(0,0,0,.25)}
+          .card{background:var(--surface);border:1px solid var(--line);border-radius:var(--r)}
           /* ─── tabs ─── */
           .tabs{display:flex;gap:4px;padding:6px;border-bottom:1px solid var(--line);background:rgba(255,255,255,.02);border-radius:var(--r) var(--r) 0 0}
           .tab{flex:1;min-height:38px;border:0;background:transparent;color:var(--muted);border-radius:8px;font-weight:600;font-size:12.5px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:6px;transition:.2s}
           .tab:hover{color:var(--txt);background:rgba(255,255,255,.04)}.tab.on{color:var(--txt);background:var(--raised);box-shadow:inset 0 0 0 1px var(--line2)}
           .tab .n{width:18px;height:18px;border-radius:6px;background:rgba(255,255,255,.08);display:grid;place-items:center;font-size:11px;color:var(--faint)}
           .tab.on .n{background:var(--grad);color:#0a0d13}
-          .pane{display:none;padding:18px}.pane.on{display:block;animation:fade .25s ease}
-          @keyframes fade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+          .pane{display:none;padding:18px}.pane.on{display:block}
           .pane h3{margin:0 0 4px;font-size:15px;letter-spacing:-.01em}.pane p.lead{margin:0 0 14px;color:var(--muted);font-size:13px}
           label.l{display:flex;justify-content:space-between;font-size:12px;color:var(--muted);margin:12px 0 6px;font-weight:500}label.l:first-child{margin-top:0}
           input,select,textarea{width:100%;background:var(--bg2);border:1px solid var(--line2);color:var(--txt);border-radius:var(--r2);padding:10px 12px;font:inherit;font-size:13.5px;min-height:42px;outline:none;transition:border-color .15s,box-shadow .15s}
@@ -4181,18 +4209,17 @@ jobs:
           .col-h h2{margin:0;font-size:16px;letter-spacing:-.01em;display:flex;align-items:center;gap:10px}
           .status{font-size:12px;color:var(--muted);font-weight:500;display:inline-flex;align-items:center;gap:6px}
           .status i{width:8px;height:8px;border-radius:50%;background:var(--faint)}.status.run i{background:var(--warn);animation:pulse 1.2s infinite}.status.done i{background:var(--ok)}.status.paused i{background:var(--acc2)}
-          @keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(245,182,61,.5)}70%{box-shadow:0 0 0 6px rgba(245,182,61,0)}}
+          @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
           .filters{display:flex;gap:4px;margin-left:auto;background:rgba(255,255,255,.04);padding:4px;border-radius:9px;border:1px solid var(--line)}
           .filters button{border:0;background:transparent;color:var(--muted);font-size:12px;font-weight:600;padding:5px 10px;border-radius:6px;cursor:pointer}
           .filters button.on{background:var(--raised);color:var(--txt)}.filters button b{color:var(--faint);font-weight:600;margin-left:4px}
-          .progress{height:4px;background:rgba(255,255,255,.06)}.progress i{display:block;height:100%;background:var(--grad);width:0;transition:width .5s ease;box-shadow:0 0 12px rgba(56,214,255,.6)}
+          .progress{height:4px;background:rgba(255,255,255,.06)}.progress i{display:block;height:100%;background:var(--acc);width:0}
           .banner{margin:16px 18px 0;padding:14px 16px;border-radius:10px;border:1px solid rgba(245,182,61,.35);background:rgba(245,182,61,.08);color:#ffe0a3;font-size:13px;display:none}.banner.on{display:block}
           .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:14px;padding:18px}
           @media(max-width:560px){.grid{grid-template-columns:1fr;padding:12px}}
-          .item{background:var(--bg2);border:1px solid var(--line);border-radius:var(--r);overflow:hidden;position:relative;transition:border-color .2s,transform .2s;display:flex;flex-direction:column}
+          .item{background:var(--bg2);border:1px solid var(--line);border-radius:var(--r);overflow:hidden;position:relative;display:flex;flex-direction:column;content-visibility:auto;contain-intrinsic-size:auto 420px}
           .item:hover{border-color:var(--line2)}
-          .item.running{border-color:rgba(245,182,61,.4)}.item.running::before{content:"";position:absolute;inset:-1px;border-radius:var(--r);padding:1px;background:linear-gradient(120deg,transparent 30%,rgba(245,182,61,.8),transparent 70%);-webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);-webkit-mask-composite:xor;mask-composite:exclude;animation:spin 2.2s linear infinite;pointer-events:none;background-size:300% 300%}
-          @keyframes spin{0%{background-position:0% 50%}100%{background-position:300% 50%}}
+          .item.running{border-color:rgba(245,182,61,.55)}
           .item.failed,.item.partial{border-color:rgba(255,107,107,.35)}
           .ih{display:flex;align-items:center;gap:10px;padding:12px 14px 10px}
           .idx{width:30px;height:30px;border-radius:8px;display:grid;place-items:center;font-size:12px;font-weight:700;background:rgba(255,255,255,.06);color:var(--muted);flex:none;font-variant-numeric:tabular-nums}
@@ -4247,13 +4274,12 @@ jobs:
           .strip .beside .meta2{font-size:11.5px;color:var(--faint);display:flex;gap:6px;flex-wrap:wrap;margin-top:auto}
           .fr{position:relative;border-radius:8px;overflow:hidden;background:var(--surface);aspect-ratio:9/16;border:1px solid var(--line)}
           .fr.sq{aspect-ratio:1}.fr.land{aspect-ratio:16/9}
-          .fr img{width:100%;height:100%;object-fit:cover;display:block;cursor:zoom-in;transition:transform .3s}.fr:hover img{transform:scale(1.04)}
+          .fr img{width:100%;height:100%;object-fit:cover;display:block;cursor:zoom-in}
           .fr .cap{position:absolute;left:0;right:0;bottom:0;padding:14px 6px 5px;font-size:10px;color:#fff;background:linear-gradient(transparent,rgba(0,0,0,.75));pointer-events:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
           .fr .ph{position:absolute;inset:0;display:grid;place-items:center;font-size:10.5px;color:var(--faint);text-align:center;padding:6px}
-          .fr.running .ph{color:#ffd27a}.fr.running::after{content:"";position:absolute;inset:0;background:linear-gradient(110deg,transparent 30%,rgba(255,255,255,.07) 50%,transparent 70%);background-size:200% 100%;animation:shimmer 1.4s infinite}
-          @keyframes shimmer{from{background-position:200% 0}to{background-position:-200% 0}}
+          .fr.running .ph{color:#ffd27a}
           .fr.failed{border-color:rgba(255,107,107,.45)}.fr.failed .ph{color:#ffb3b3}
-          .fr .re{position:absolute;top:5px;right:5px;width:26px;height:26px;border-radius:7px;border:0;background:rgba(0,0,0,.6);color:#fff;cursor:pointer;display:grid;place-items:center;opacity:0;transition:.15s;backdrop-filter:blur(4px)}
+          .fr .re{position:absolute;top:5px;right:5px;width:26px;height:26px;border-radius:7px;border:0;background:rgba(0,0,0,.72);color:#fff;cursor:pointer;display:grid;place-items:center;opacity:0}
           .fr:hover .re,.fr.failed .re{opacity:1}.fr .re svg{width:13px;height:13px}
           .prompt{padding:10px 14px 0;font-size:12.5px;color:var(--muted);line-height:1.5;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;cursor:pointer}
           .prompt.open{display:block}
@@ -4263,13 +4289,11 @@ jobs:
           .if .meta code{font-size:11px}
           .empty{padding:70px 24px;text-align:center;color:var(--muted)}
           .empty .phones{display:flex;justify-content:center;gap:10px;margin-bottom:22px}
-          .empty .phones i{width:46px;height:82px;border-radius:10px;border:1px solid var(--line2);background:linear-gradient(160deg,rgba(109,140,255,.25),rgba(56,214,255,.05));position:relative;animation:float 4s ease-in-out infinite}
-          .empty .phones i:nth-child(2){animation-delay:.6s;background:linear-gradient(160deg,rgba(245,182,61,.3),rgba(255,107,107,.05))}.empty .phones i:nth-child(3){animation-delay:1.2s;background:linear-gradient(160deg,rgba(167,139,250,.3),rgba(56,214,255,.05))}.empty .phones i:nth-child(4){animation-delay:1.8s;background:linear-gradient(160deg,rgba(62,207,142,.3),rgba(109,140,255,.05))}
+          .empty .phones i{width:46px;height:82px;border-radius:10px;border:1px solid var(--line2);background:rgba(109,140,255,.14);position:relative}
           .empty .phones i::before{content:"";position:absolute;top:6px;left:50%;transform:translateX(-50%);width:14px;height:3px;border-radius:2px;background:rgba(255,255,255,.25)}
-          @keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-6px)}}
           .empty h4{margin:0 0 6px;font-size:16px;color:var(--txt)}.empty p{margin:0;font-size:13px;max-width:420px;margin-inline:auto}
           /* ─── console ─── */
-          .console{position:fixed;left:0;right:0;bottom:0;z-index:15;background:rgba(10,13,19,.92);backdrop-filter:blur(12px);border-top:1px solid var(--line2);transform:translateY(calc(100% - 40px));transition:transform .3s ease}
+          .console{position:fixed;left:0;right:0;bottom:0;z-index:15;background:#0a0d13;border-top:1px solid var(--line2);transform:translateY(calc(100% - 40px));transition:transform .2s ease}
           .console.open{transform:none}
           .console .bar{height:40px;display:flex;align-items:center;gap:12px;padding:0 24px;cursor:pointer;user-select:none;font-size:12.5px;color:var(--muted)}
           .console .bar b{color:var(--txt);font-weight:600}.console .bar .last{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;color:var(--faint)}
@@ -4278,13 +4302,12 @@ jobs:
           .console pre .ok{color:#9ef0c6}.console pre .er{color:#ffb3b3}.console pre .wn{color:#ffd27a}.console pre .in{color:#9de9ff}.console pre .ts{color:var(--faint)}
           /* ─── lightbox / toast ─── */
           .lb{position:fixed;inset:0;z-index:50;background:rgba(5,7,10,.92);display:none;place-items:center;padding:24px;cursor:zoom-out}
-          .lb.on{display:grid;animation:fade .2s}.lb img{max-width:min(94vw,560px);max-height:92vh;border-radius:14px;box-shadow:0 30px 90px rgba(0,0,0,.7)}
+          .lb.on{display:grid}.lb img{max-width:min(94vw,560px);max-height:92vh;border-radius:14px}
           .lb .cap{position:absolute;bottom:18px;left:0;right:0;text-align:center;color:var(--muted);font-size:13px}
           .toasts{position:fixed;top:76px;right:24px;z-index:60;display:flex;flex-direction:column;gap:8px;pointer-events:none}
-          .toast{background:var(--raised);border:1px solid var(--line2);color:var(--txt);padding:10px 14px;border-radius:10px;font-size:13px;box-shadow:0 12px 30px rgba(0,0,0,.4);animation:tin .25s ease;max-width:360px}
+          .toast{background:var(--raised);border:1px solid var(--line2);color:var(--txt);padding:10px 14px;border-radius:10px;font-size:13px;max-width:360px}
           .toast.bad{border-color:rgba(255,107,107,.45)}.toast.good{border-color:rgba(62,207,142,.45)}
-          @keyframes tin{from{opacity:0;transform:translateX(12px)}to{opacity:1;transform:none}}
-          .done-banner{margin:16px 18px 0;padding:16px 18px;border-radius:12px;background:linear-gradient(135deg,rgba(62,207,142,.16),rgba(56,214,255,.1));border:1px solid rgba(62,207,142,.35);color:#d9fbe9;font-size:13.5px;display:none}.done-banner.on{display:block}
+          .done-banner{margin:16px 18px 0;padding:16px 18px;border-radius:12px;background:rgba(62,207,142,.12);border:1px solid rgba(62,207,142,.35);color:#d9fbe9;font-size:13.5px;display:none}.done-banner.on{display:block}
           .done-banner b{display:block;font-size:15px;margin-bottom:4px;color:#fff}
           @media(max-width:1500px){.brand small{display:none}.kpi{min-width:106px;padding:6px 10px 6px 8px}}
           @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
@@ -4513,7 +4536,7 @@ jobs:
           function itemCard(i){
            const done=i.frames.filter(f=>f.status==='done').length,n=i.frames.length;
            const shape=i.type==='SINGLE'&&i.settings.ratio!=='9:16'?(i.settings.ratio==='1:1'?' sq':(i.settings.ratio==='16:9'||i.settings.ratio==='4:3')?' land':''):'';
-           const frames=i.frames.map((f,k)=>\`<div class="fr \${f.status}\${shape}" title="\${esc(f.name)}\${f.error?' — '+esc(f.error):''}\${f.warn?' — ⚠ '+esc(f.warn):''}">\${f.status==='done'?\`<img src="\${f.thumb}" loading="lazy" alt="\${esc(f.file)}" onclick="lb('\${f.full||f.thumb}','\${esc(i.folder)} · \${esc(f.file)}')">\`:\`<div class="ph">\${f.status==='running'?'rendering…':f.status==='failed'?'failed':'queued'}</div>\`}\${i.status!=='running'&&!i.distributed.length?\`<button class="re" title="Regenerate \${esc(f.name)}" onclick="retry(\${i.id},\${k})">\${RE}</button>\`:''}<div class="cap">\${f.warn?'⚠ ':''}\${esc(f.name)}</div></div>\`).join('');
+           const frames=i.frames.map((f,k)=>\`<div class="fr \${f.status}\${f.companion?' sq':shape}" title="\${esc(f.name)}\${f.error?' — '+esc(f.error):''}\${f.warn?' — ⚠ '+esc(f.warn):''}">\${f.status==='done'?\`<img src="\${f.thumb}" loading="lazy" decoding="async" alt="\${esc(f.file)}" onclick="lb('\${f.full||f.thumb}','\${esc(i.folder)} · \${esc(f.file)}')">\`:\`<div class="ph">\${f.status==='running'?'rendering…':f.status==='failed'?'failed':'queued'}</div>\`}\${i.status!=='running'&&!i.distributed.length?\`<button class="re" title="Regenerate \${esc(f.name)}" onclick="retry(\${i.id},\${k})">\${RE}</button>\`:''}<div class="cap">\${f.warn?'⚠ ':''}\${esc(f.name)}</div></div>\`).join('');
            const dist=i.distributed.length?\`<span class="st dist">🔒 \${esc(i.distributed[0].dbName)} only</span>\`:'';const mst=i.status==='done'&&i.meta&&i.meta.title?\`<span class="st dist" style="color:\${i.meta.policyCheck==='held'?'#ffb3b3':'#9ef0c6'}">\${i.meta.policyCheck==='held'?'🛑 held':'🧠 meta ✓'}</span>\`:'';
            const busyDist='';
            return \`<article class="item \${i.status}" data-id="\${i.id}">
@@ -4595,7 +4618,12 @@ jobs:
            const r=await api('/api/settings',{settings,credentials});msgEl.textContent='Saved ✓'+(r.creds.ok?'':' · keys still missing');$('#c_key').value='';$('#c_secret').value='';toast('Settings saved','good')}catch(e){msgEl.textContent=e.message;toast(e.message,'bad')}poll()});
           $('#addBtn').onclick=async()=>{const m=$('#addMsg');try{$('#addBtn').disabled=true;const r=await api('/api/prompts',{text:$('#ptext').value,type:document.querySelector('input[name=ptype]:checked').value,copies:$('#copies').value});
            setMsg(m,\`Queued \${r.added} item(s) · \${r.frames} frame(s)\${r.problems.length?' · skipped: '+r.problems.join('; '):''}\${r.credsOk?'':' — add Cloudinary keys to start'}\`,r.credsOk?'ok':'bad');$('#ptext').value='';$('#ptext').dispatchEvent(new Event('input'));toast(\`Queued \${r.added} item(s)\`,'good');if(!r.credsOk){$$('.tab')[3].click()}}catch(e){setMsg(m,e.message,'bad');toast(e.message,'bad')}finally{$('#addBtn').disabled=false}poll()};
-          poll();setInterval(poll,2500);
+          // v27.15 LITE: poll only while the tab is visible (hidden tab = 0% CPU), 4s instead of 2.5s
+          let pollTimer=null;
+          function schedulePoll(){clearTimeout(pollTimer);pollTimer=setTimeout(tick,document.hidden?20000:4000)}
+          async function tick(){if(!document.hidden){try{await poll()}catch(e){}}schedulePoll()}
+          document.addEventListener('visibilitychange',()=>{if(!document.hidden)poll();schedulePoll()});
+          poll();schedulePoll();
           </script></body></html>
 
           `;
