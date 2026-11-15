@@ -2094,12 +2094,17 @@ jobs:
           GEMINI_SESSION: ${{ secrets.GEMINI_SESSION }}
           GEMINI_SESSION_INPUT: ${{ github.event.inputs.gemini_session }}
           IMAGE_QUEUE_PATH: ${{ github.event.inputs.image_queue_path }}
+          # Gemini's /app response headers exceed Node's default 16 KB parser limit
+          # (HPE_HEADER_OVERFLOW → "Parse Error: Header overflow"). Chrome allows far
+          # more, which is why the extension never hit this. Raise the cap to 256 KB.
+          NODE_OPTIONS: --max-http-header-size=262144
         run: |
           cat > image_metadata.mjs << 'IMGMETA_EOF'
           import fetch from 'node-fetch';
           import fs from 'fs';
           import path from 'path';
           import os from 'os';
+          import http from 'http';
           import { execSync } from 'child_process';
 
           // ─── CONFIG ────────────────────────────────────────────────────────────────
@@ -2271,11 +2276,19 @@ jobs:
           // The Gemini HD Studio extension never drives a browser for metadata — it sends
           // plain HTTP calls with the account cookies. We do exactly the same here: no
           // Playwright, no DOM, no clipboard tricks, no 90s response-wait timeouts.
+          //
+          // SKIPPED_COOKIES: bulk UI-state blobs that are NOT needed to authenticate.
+          // A typical EditThisCookie export carries a ~2 KB COMPASS preference blob
+          // (often twice, for .google.com AND gemini.google.com) plus a session "S"
+          // blob — together they inflate the request Cookie header by ~2 KB for zero
+          // auth value. Auth lives in SID / HSID / SSID / APISID / SAPISID / __Secure-*.
+          const SKIPPED_COOKIES = new Set(['COMPASS', 'S', 'SEARCH_SAMESITE']);
           function buildCookieHeader(storageState) {
             const byName = new Map();
             for (const c of storageState.cookies) {
               if (!c || !c.name || c.value === undefined || !c.domain) continue;
               if (!c.domain.includes('google.com')) continue;
+              if (SKIPPED_COOKIES.has(c.name)) continue;
               // Prefer the account-level ".google.com" cookie when a name exists twice
               if (!byName.has(c.name) || c.domain === '.google.com') {
                 byName.set(c.name, c.value);
@@ -2284,7 +2297,27 @@ jobs:
             return [...byName.entries()].map(([k, v]) => `${k}=${v}`).join('; ');
           }
           const COOKIE_HEADER = buildCookieHeader(GEMINI_STORAGE_STATE);
-          console.log(`🍪 Cookie header built: ${COOKIE_HEADER.split('; ').length} cookies for google.com`);
+          console.log(`🍪 Cookie header built: ${COOKIE_HEADER.split('; ').length} cookies for google.com (${COOKIE_HEADER.length} bytes)`);
+
+          // Minimal auth-only cookie header — fallback when Google answers with
+          // "431 Request Header Fields Too Large" on an oversized cookie jar.
+          function buildMinimalCookieHeader(storageState) {
+            const ESSENTIAL = new Set([
+              'SID', 'HSID', 'SSID', 'APISID', 'SAPISID',
+              '__Secure-1PSID', '__Secure-3PSID', '__Secure-1PAPISID', '__Secure-3PAPISID',
+              '__Secure-1PSIDTS', '__Secure-3PSIDTS', 'SIDCC', 'NID'
+            ]);
+            const byName = new Map();
+            for (const c of storageState.cookies) {
+              if (!c || !c.name || c.value === undefined || !c.domain) continue;
+              if (!c.domain.includes('google.com')) continue;
+              if (!ESSENTIAL.has(c.name)) continue;
+              if (!byName.has(c.name) || c.domain === '.google.com') byName.set(c.name, c.value);
+            }
+            return [...byName.entries()].map(([k, v]) => `${k}=${v}`).join('; ');
+          }
+          const COOKIE_HEADER_MIN = buildMinimalCookieHeader(GEMINI_STORAGE_STATE);
+          console.log(`🍪 Minimal fallback cookie header: ${COOKIE_HEADER_MIN.split('; ').length} cookies (${COOKIE_HEADER_MIN.length} bytes)`);
 
           // ─── FIREBASE DB ROUTING ──────────────────────────────────────────────────
           // <-- CONFIG: your Firebase Realtime Database URLs (same as in index.html / Core.kt / zedgeN.yml)
@@ -2657,37 +2690,67 @@ jobs:
           let cachedGeminiSession = null;
 
           // ─── STEP 1: SESSION BOOTSTRAP (SNlM0e / cfb2h / FdrFJe from the app HTML) ─
-          async function fetchGeminiSession(authUser) {
-            const appUrl = `https://gemini.google.com/u/${authUser}/app?authuser=${authUser}`;
-            const res = await fetchWithTimeout(appUrl, {
-              method: 'GET',
-              redirect: 'follow',
-              headers: {
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Cookie': COOKIE_HEADER,
-                'User-Agent': GEMINI_UA
+          // NOTE ON "Parse Error: Header overflow": Node's HTTP parser caps response
+          // headers at 16 KB by default (HPE_HEADER_OVERFLOW). Gemini's /app response
+          // ships a large header block (many Set-Cookie entries), which Chrome accepts
+          // but Node rejects. The workflow raises the cap with
+          // --max-http-header-size=262144 (CLI flag + NODE_OPTIONS) before this code runs.
+          async function fetchGeminiSession(authUser, cookieHeader = COOKIE_HEADER) {
+            // Gemini serves the bootstrap tokens from several app entry points depending
+            // on account type and rollout state. Try each instead of giving up on the first.
+            const appUrls = [
+              `https://gemini.google.com/u/${authUser}/app?authuser=${authUser}`,
+              `https://gemini.google.com/app?authuser=${authUser}`,
+              `https://gemini.google.com/u/${authUser}/app?authuser=${authUser}&hl=en`
+            ];
+
+            let lastErr = null;
+            for (const appUrl of appUrls) {
+              let res;
+              try {
+                res = await fetchWithTimeout(appUrl, {
+                  method: 'GET',
+                  redirect: 'follow',
+                  headers: {
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                    'Cookie': cookieHeader,
+                    'User-Agent': GEMINI_UA
+                  }
+                }, 45000);
+              } catch (e) {
+                if (/header overflow|HPE_HEADER_OVERFLOW/i.test(e.message || '')) {
+                  throw new Error(
+                    `HTTP header overflow on u/${authUser} — Node's header limit is ${(http.maxHeaderSize / 1024)} KB. ` +
+                    `Re-run with --max-http-header-size=262144 (the workflow already sets this; if you see it, the flag was stripped).`
+                  );
+                }
+                lastErr = e;
+                continue;
               }
-            }, 45000);
 
-            const finalUrl = res.url || '';
-            if (!res.ok || /accounts\.google\.com|ServiceLogin|\/signin|\/login/.test(finalUrl)) {
-              throw new Error(`u/${authUser} not signed in (HTTP ${res.status}, landed on ${finalUrl.slice(0, 80)})`);
-            }
+              const finalUrl = res.url || '';
+              if (!res.ok || /accounts\.google\.com|ServiceLogin|\/signin|\/login/.test(finalUrl)) {
+                lastErr = new Error(`u/${authUser} not signed in (HTTP ${res.status}, landed on ${finalUrl.slice(0, 80)})`);
+                continue;
+              }
 
-            const html = await res.text();
-            const atMatch   = html.match(/"SNlM0e":"([^"]+)"/);
-            const blMatch   = html.match(/"cfb2h":"([^"]+)"/);
-            const fSidMatch = html.match(/"FdrFJe":"([^"]+)"/);
-            if (!atMatch || !atMatch[1]) {
-              throw new Error(`SNlM0e token not found in Gemini app HTML for u/${authUser} — session cookies likely expired`);
+              const html = await res.text();
+              const atMatch   = html.match(/"SNlM0e":"([^"]+)"/);
+              const blMatch   = html.match(/"cfb2h":"([^"]+)"/);
+              const fSidMatch = html.match(/"FdrFJe":"([^"]+)"/);
+              if (!atMatch || !atMatch[1]) {
+                lastErr = new Error(`SNlM0e token not found in Gemini app HTML for u/${authUser} (${appUrl}) — session cookies likely expired`);
+                continue;
+              }
+              return {
+                authUser,
+                at: atMatch[1],
+                bl: blMatch ? blMatch[1] : 'boq_gemini-web-uiserver_20261106.06_p0',
+                fSid: fSidMatch ? fSidMatch[1] : '',
+                fetchedAt: Date.now()
+              };
             }
-            return {
-              authUser,
-              at: atMatch[1],
-              bl: blMatch ? blMatch[1] : 'boq_gemini-web-uiserver_20261106.06_p0',
-              fSid: fSidMatch ? fSidMatch[1] : '',
-              fetchedAt: Date.now()
-            };
+            throw lastErr || new Error(`u/${authUser}: could not bootstrap a Gemini session`);
           }
 
           async function getGeminiSession(forceRefresh = false) {
@@ -2696,16 +2759,22 @@ jobs:
             }
             const preferred = parseInt(process.env.GEMINI_AUTH_USER || '0', 10) || 0;
             try {
-              cachedGeminiSession = await fetchGeminiSession(preferred);
+              cachedGeminiSession = await fetchGeminiSession(preferred, COOKIE_HEADER);
             } catch (e) {
-              console.warn(`  ⚠️  Gemini u/${preferred} session failed (${e.message}) — scanning u/0..u/5 like the extension...`);
-              let found = null;
-              for (const u of [0, 1, 2, 3, 4, 5]) {
-                if (u === preferred) continue;
-                try { found = await fetchGeminiSession(u); break; } catch (_) {}
+              console.warn(`  ⚠️  Gemini u/${preferred} session failed (${e.message}) — retrying with the minimal auth-only cookie set...`);
+              try {
+                cachedGeminiSession = await fetchGeminiSession(preferred, COOKIE_HEADER_MIN);
+                console.log('  ✅ Minimal cookie set worked (the full jar was too large for Google).');
+              } catch (e2) {
+                console.warn(`  ⚠️  Minimal cookie set also failed (${e2.message}) — scanning u/0..u/5 like the extension...`);
+                let found = null;
+                for (const u of [0, 1, 2, 3, 4, 5]) {
+                  if (u === preferred) continue;
+                  try { found = await fetchGeminiSession(u, COOKIE_HEADER); break; } catch (_) {}
+                }
+                if (!found) throw e;
+                cachedGeminiSession = found;
               }
-              if (!found) throw e;
-              cachedGeminiSession = found;
             }
             console.log(`🔑 Gemini RPC session ready: account u/${cachedGeminiSession.authUser}, bl=${cachedGeminiSession.bl}`);
             return cachedGeminiSession;
@@ -3149,7 +3218,7 @@ jobs:
             process.exit(1);
           }
           IMGMETA_EOF
-          node --experimental-vm-modules image_metadata.mjs
+          node --experimental-vm-modules --max-http-header-size=262144 image_metadata.mjs
 
       - name: 📊 Upload Run Summary
         if: always()
