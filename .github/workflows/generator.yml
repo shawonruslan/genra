@@ -18,6 +18,11 @@ on:
         required: false
         default: ""
 
+      studio_password:
+        description: "🔒 Studio Web Panel Password (optional — uses STUDIO_PASSWORD secret or auto-generates if empty)"
+        required: false
+        default: ""
+
 jobs:
   generate-ringtones:
     if: github.event.inputs.mode == 'ringtone'
@@ -107,6 +112,7 @@ jobs:
           STABLE_AUDIO_TOKEN: ${{ secrets.STABLE_AUDIO_TOKEN }}
           GEMINI_SESSION: ${{ secrets.GEMINI_SESSION }}
           GEMINI_SESSION_INPUT: ${{ github.event.inputs.gemini_session }}
+          STUDIO_PASSWORD: ${{ github.event.inputs.studio_password || secrets.STUDIO_PASSWORD }}
           AUTO_GENERATE_COUNT: "0"
           STUDIO_PORT: "8787"
           STUDIO_MAX_MINUTES: "180"
@@ -177,6 +183,110 @@ jobs:
               }
               ::-webkit-scrollbar-thumb:hover {
                 background: var(--accent);
+              }
+
+              /* LOGIN LOCK SCREEN OVERLAY */
+              .login-overlay {
+                position: fixed;
+                inset: 0;
+                background: var(--bg-base);
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                z-index: 500;
+                padding: 20px;
+              }
+
+              .login-overlay.hidden {
+                display: none;
+              }
+
+              .login-card {
+                width: 100%;
+                max-width: 400px;
+                background: var(--bg-panel);
+                border: 1px solid var(--border);
+                border-radius: var(--radius-lg);
+                padding: 28px 24px;
+                display: flex;
+                flex-direction: column;
+                gap: 18px;
+                box-shadow: 0 20px 50px rgba(0, 0, 0, 0.65);
+              }
+
+              .login-header {
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                text-align: center;
+                gap: 10px;
+              }
+
+              .login-icon-box {
+                width: 48px;
+                height: 48px;
+                border-radius: 12px;
+                background: var(--accent-soft);
+                border: 1px solid var(--accent-border);
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                color: var(--accent);
+              }
+
+              .pwd-input-wrap {
+                position: relative;
+                display: flex;
+                align-items: center;
+              }
+
+              .pwd-input-wrap input {
+                width: 100%;
+                padding: 10px 38px 10px 12px;
+                background: var(--bg-input);
+                border: 1px solid var(--border);
+                border-radius: var(--radius-sm);
+                color: var(--text-main);
+                font-family: var(--font-mono);
+                font-size: 13px;
+                outline: none;
+              }
+
+              .pwd-input-wrap input:focus {
+                border-color: var(--accent);
+              }
+
+              .pwd-toggle-btn {
+                position: absolute;
+                right: 8px;
+                background: transparent;
+                border: none;
+                color: var(--text-muted);
+                cursor: pointer;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                padding: 4px;
+              }
+
+              .pwd-toggle-btn:hover {
+                color: var(--text-main);
+              }
+
+              .login-error {
+                display: none;
+                background: var(--danger-soft);
+                border: 1px solid rgba(239, 68, 68, 0.35);
+                color: var(--danger);
+                padding: 8px 11px;
+                border-radius: var(--radius-sm);
+                font-size: 12px;
+                align-items: center;
+                gap: 7px;
+              }
+
+              .login-error.show {
+                display: flex;
               }
 
               /* TOPBAR */
@@ -751,6 +861,66 @@ jobs:
                 transition: border-color 0.15s ease;
               }
 
+              .audio-card.is-new {
+                border-left: 3px solid var(--accent);
+              }
+
+              .pill.new-badge {
+                background: var(--accent);
+                color: #04130d;
+                border-color: var(--accent);
+                font-weight: 700;
+                letter-spacing: 0.4px;
+              }
+
+              .pill.old-badge {
+                background: #14181d;
+                color: var(--text-muted);
+                border-color: #262c34;
+              }
+
+              .lib-tabs {
+                display: inline-flex;
+                background: var(--bg-input);
+                border: 1px solid var(--border);
+                border-radius: var(--radius-sm);
+                padding: 3px;
+                gap: 3px;
+              }
+
+              .lib-tab-btn {
+                background: transparent;
+                border: none;
+                color: var(--text-secondary);
+                padding: 5px 11px;
+                font-size: 11.5px;
+                font-weight: 600;
+                border-radius: 4px;
+                cursor: pointer;
+                display: inline-flex;
+                align-items: center;
+                gap: 6px;
+                transition: all 0.15s ease;
+              }
+
+              .lib-tab-btn:hover {
+                color: var(--text-main);
+              }
+
+              .lib-tab-btn.active {
+                background: var(--accent-soft);
+                color: var(--accent);
+                border: 1px solid var(--accent-border);
+              }
+
+              .lib-count {
+                font-family: var(--font-mono);
+                font-size: 10.5px;
+                padding: 1px 5px;
+                border-radius: 3px;
+                background: rgba(255, 255, 255, 0.06);
+              }
+
               .audio-card:hover {
                 border-color: #36404d;
               }
@@ -965,6 +1135,46 @@ jobs:
           </head>
           <body>
 
+            <!-- PASSWORD LOCK SCREEN OVERLAY -->
+            <div class="login-overlay" id="loginOverlay">
+              <form class="login-card" onsubmit="submitStudioLogin(event)">
+                <div class="login-header">
+                  <div class="login-icon-box">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+                      <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+                    </svg>
+                  </div>
+                  <div>
+                    <div style="font-size:16px; font-weight:700; letter-spacing:0.4px;">RINGTONE STUDIO PRO</div>
+                    <div style="font-size:12px; color:var(--text-secondary); margin-top:2px;">Password Protected Cloud Audio Workstation</div>
+                  </div>
+                </div>
+
+                <div class="login-error" id="loginErrorBox">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                  <span id="loginErrorText">Invalid studio password</span>
+                </div>
+
+                <div class="field-group">
+                  <div class="field-label">
+                    <span>Studio Access Password</span>
+                  </div>
+                  <div class="pwd-input-wrap">
+                    <input type="password" id="studioPasswordInput" placeholder="Enter studio password..." autocomplete="current-password" required />
+                    <button type="button" class="pwd-toggle-btn" onclick="togglePasswordVisibility()" title="Show / Hide Password">
+                      <svg id="pwdEyeIcon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                    </button>
+                  </div>
+                </div>
+
+                <button type="submit" class="btn btn-primary" id="loginSubmitBtn" style="padding:10px 16px; width:100%;">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg>
+                  Unlock Studio Panel
+                </button>
+              </form>
+            </div>
+
             <!-- TOPBAR -->
             <header class="topbar">
               <div class="brand">
@@ -995,6 +1205,10 @@ jobs:
                 <button class="btn btn-ghost" onclick="syncFirebaseAudios()" title="Reload generated audios from Firebase">
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5V19A9 3 0 0 0 21 19V5"/><path d="M3 12A9 3 0 0 0 21 12"/></svg>
                   Sync DB
+                </button>
+                <button class="btn btn-ghost" onclick="lockStudioSession()" title="Lock Studio Panel (Log Out)">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                  Lock
                 </button>
                 <button class="btn btn-danger" onclick="shutdownServer()" title="Stop Studio Server and complete GitHub Action">
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/></svg>
@@ -1439,22 +1653,38 @@ jobs:
                 <!-- FILTER & SEARCH TOOLBAR -->
                 <div class="library-toolbar">
                   <div class="filter-group">
-                    <input type="text" id="searchFilter" placeholder="Filter by title, tag, prompt..." style="width:220px; padding:6px 10px;" oninput="renderAudioGrid()" />
-                    <select id="dbFilter" style="width:140px; padding:6px 10px;" onchange="renderAudioGrid()">
+                    <div class="lib-tabs">
+                      <button type="button" class="lib-tab-btn active" id="view-tab-new" onclick="setLibraryView('NEW')">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+                        New Generated
+                        <span class="lib-count" id="countNewBadge">0</span>
+                      </button>
+                      <button type="button" class="lib-tab-btn" id="view-tab-old" onclick="setLibraryView('OLD')">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5V19A9 3 0 0 0 21 19V5"/><path d="M3 12A9 3 0 0 0 21 12"/></svg>
+                        Old Firebase Queue
+                        <span class="lib-count" id="countOldBadge">0</span>
+                      </button>
+                      <button type="button" class="lib-tab-btn" id="view-tab-all" onclick="setLibraryView('ALL')">
+                        All
+                        <span class="lib-count" id="countAllBadge">0</span>
+                      </button>
+                    </div>
+                  </div>
+                  <div class="filter-group">
+                    <input type="text" id="searchFilter" placeholder="Filter by title, tag, prompt..." style="width:190px; padding:6px 10px;" oninput="renderAudioGrid()" />
+                    <select id="dbFilter" style="width:130px; padding:6px 10px;" onchange="renderAudioGrid()">
                       <option value="ALL">All Accounts</option>
                       <option value="zedge_1">zedge_1</option>
                       <option value="zedge_2">zedge_2</option>
                       <option value="zedge_3">zedge_3</option>
                       <option value="zedge_4">zedge_4</option>
                     </select>
-                    <select id="catFilter" style="width:150px; padding:6px 10px;" onchange="renderAudioGrid()">
+                    <select id="catFilter" style="width:140px; padding:6px 10px;" onchange="renderAudioGrid()">
                       <option value="ALL">All Categories</option>
                     </select>
-                  </div>
-                  <div class="filter-group">
                     <button type="button" class="btn btn-ghost" onclick="stopAllAudio()">
                       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="6" width="12" height="12"/></svg>
-                      Stop Audio
+                      Stop
                     </button>
                   </div>
                 </div>
@@ -1516,10 +1746,32 @@ jobs:
               ];
 
               let soundMode = 'Ringtone';
+              let libraryViewMode = 'NEW'; // 'NEW' | 'OLD' | 'ALL'
               let selectedInstruments = new Set();
               let allAudios = [];
-              let activeAudioEl = null;
+
+              function setLibraryView(mode) {
+                libraryViewMode = mode;
+                document.querySelectorAll('.lib-tab-btn').forEach(b => b.classList.remove('active'));
+                const btn = document.getElementById('view-tab-' + mode.toLowerCase());
+                if (btn) btn.classList.add('active');
+                renderAudioGrid();
+              }
+
+              function formatRelativeTime(ts) {
+                if (!ts) return '';
+                const diffSec = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+                if (diffSec < 60) return 'Just now';
+                if (diffSec < 3600) return Math.floor(diffSec / 60) + 'm ago';
+                if (diffSec < 86400) return Math.floor(diffSec / 3600) + 'h ago';
+                return Math.floor(diffSec / 86400) + 'd ago';
+              }
+              let lastAudioSignature = '';
+              const globalAudio = new Audio();
+              globalAudio.preload = 'auto';
               let activeCardId = null;
+              let activeStreamUrl = '';
+              let activeFallbackUrl = '';
               let defaultMasterPrompt = '';
               let defaultNegativePrompt = '';
               let defaultBannedWords = '';
@@ -1528,7 +1780,10 @@ jobs:
                 const wrap = document.getElementById('toastContainer');
                 const el = document.createElement('div');
                 el.className = 'toast' + (isError ? ' error' : '');
-                el.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="${isError ? '#ef4444' : '#10b981'}" stroke-width="2.2"><polyline points="20 6 9 17 4 12"/></svg><span>${escapeHtml(msg)}</span>`;
+                const iconSvg = isError
+                  ? `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#ef4444" stroke-width="2.2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>`
+                  : `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2.2"><polyline points="20 6 9 17 4 12"/></svg>`;
+                el.innerHTML = `${iconSvg}<span>${escapeHtml(msg)}</span>`;
                 wrap.appendChild(el);
                 setTimeout(() => el.remove(), 3800);
               }
@@ -1735,6 +1990,7 @@ jobs:
                   });
                   const data = await res.json();
                   if (!res.ok) throw new Error(data.error || 'Could not start generation');
+                  setLibraryView('NEW');
                   showToast(`Started batch generation (${data.total} item${data.total === 1 ? '' : 's'})`);
                   pollState();
                 } catch (e) {
@@ -1791,70 +2047,132 @@ jobs:
                 return `${m}:${s < 10 ? '0' : ''}${s}`;
               }
 
-              function stopAllAudio() {
-                if (activeAudioEl) {
-                  activeAudioEl.pause();
-                  activeAudioEl.currentTime = 0;
-                }
+              const PLAY_SVG = `<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>`;
+              const PAUSE_SVG = `<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>`;
+
+              function syncActiveCardUi() {
                 document.querySelectorAll('.audio-card').forEach(c => c.classList.remove('playing'));
-                document.querySelectorAll('.play-btn').forEach(b => {
-                  b.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>`;
-                });
-                activeAudioEl = null;
+                document.querySelectorAll('.play-btn').forEach(b => { b.innerHTML = PLAY_SVG; });
+                if (!activeCardId) return;
+                const cardEl = document.getElementById('card-' + activeCardId);
+                const btnEl = document.getElementById('play-btn-' + activeCardId);
+                if (!globalAudio.paused) {
+                  if (cardEl) cardEl.classList.add('playing');
+                  if (btnEl) btnEl.innerHTML = PAUSE_SVG;
+                }
+              }
+
+              globalAudio.addEventListener('timeupdate', () => {
+                if (!activeCardId) return;
+                const slider = document.getElementById('seek-' + activeCardId);
+                const curLabel = document.getElementById('time-cur-' + activeCardId);
+                const durLabel = document.getElementById('time-dur-' + activeCardId);
+                if (globalAudio.duration && isFinite(globalAudio.duration)) {
+                  if (slider) {
+                    slider.max = globalAudio.duration;
+                    slider.value = globalAudio.currentTime;
+                  }
+                  if (durLabel) durLabel.textContent = formatTime(globalAudio.duration);
+                }
+                if (curLabel) curLabel.textContent = formatTime(globalAudio.currentTime);
+              });
+
+              globalAudio.addEventListener('loadedmetadata', () => {
+                if (!activeCardId) return;
+                const slider = document.getElementById('seek-' + activeCardId);
+                const durLabel = document.getElementById('time-dur-' + activeCardId);
+                if (globalAudio.duration && isFinite(globalAudio.duration)) {
+                  if (slider) slider.max = globalAudio.duration;
+                  if (durLabel) durLabel.textContent = formatTime(globalAudio.duration);
+                }
+              });
+
+              globalAudio.addEventListener('play', () => syncActiveCardUi());
+              globalAudio.addEventListener('pause', () => syncActiveCardUi());
+              globalAudio.addEventListener('ended', () => {
+                const finishedId = activeCardId;
                 activeCardId = null;
+                syncActiveCardUi();
+                if (finishedId) {
+                  const slider = document.getElementById('seek-' + finishedId);
+                  const curLabel = document.getElementById('time-cur-' + finishedId);
+                  if (slider) slider.value = 0;
+                  if (curLabel) curLabel.textContent = '0:00';
+                }
+              });
+
+              globalAudio.addEventListener('error', () => {
+                // If local stream proxy fails and we have a direct R2 fileUrl fallback, switch seamlessly
+                if (activeCardId && activeFallbackUrl && globalAudio.src !== activeFallbackUrl) {
+                  const fb = activeFallbackUrl;
+                  activeFallbackUrl = '';
+                  globalAudio.src = fb;
+                  globalAudio.play().catch(() => {});
+                }
+              });
+
+              function stopAllAudio() {
+                activeCardId = null;
+                try {
+                  globalAudio.pause();
+                  globalAudio.currentTime = 0;
+                } catch (e) {}
+                syncActiveCardUi();
               }
 
-              function togglePlayAudio(id, streamUrl) {
-                const audioEl = document.getElementById('audio-el-' + id);
-                const btnEl = document.getElementById('play-btn-' + id);
-                const cardEl = document.getElementById('card-' + id);
-                if (!audioEl) return;
-
-                if (activeAudioEl && activeAudioEl !== audioEl) {
-                  stopAllAudio();
+              async function togglePlayAudio(id, streamUrl, directR2Url = '') {
+                // Same track clicked -> toggle play/pause cleanly
+                if (activeCardId === id) {
+                  if (!globalAudio.paused) {
+                    globalAudio.pause();
+                    syncActiveCardUi();
+                    return;
+                  }
+                  try {
+                    await globalAudio.play();
+                    syncActiveCardUi();
+                  } catch (err) {
+                    if (err.name !== 'AbortError' && !/interrupted by a call to pause|removed from the document/i.test(err.message || '')) {
+                      showToast('Playback notice: ' + err.message, true);
+                    }
+                  }
+                  return;
                 }
 
-                if (audioEl.paused) {
-                  if (!audioEl.src) audioEl.src = streamUrl;
-                  audioEl.play().then(() => {
-                    activeAudioEl = audioEl;
-                    activeCardId = id;
-                    cardEl.classList.add('playing');
-                    btnEl.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>`;
-                  }).catch(err => {
-                    showToast('Playback error: ' + err.message, true);
-                  });
-                } else {
-                  audioEl.pause();
-                  cardEl.classList.remove('playing');
-                  btnEl.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>`;
-                }
-              }
+                // Switching to a new track
+                try { globalAudio.pause(); } catch (e) {}
+                activeCardId = id;
+                activeStreamUrl = streamUrl;
+                activeFallbackUrl = directR2Url || '';
+                globalAudio.src = streamUrl;
+                globalAudio.currentTime = 0;
+                syncActiveCardUi();
 
-              function onAudioTimeUpdate(id) {
-                const audioEl = document.getElementById('audio-el-' + id);
-                const slider = document.getElementById('seek-' + id);
-                const curLabel = document.getElementById('time-cur-' + id);
-                const durLabel = document.getElementById('time-dur-' + id);
-                if (!audioEl) return;
-                if (audioEl.duration && isFinite(audioEl.duration)) {
-                  slider.max = audioEl.duration;
-                  slider.value = audioEl.currentTime;
-                  durLabel.textContent = formatTime(audioEl.duration);
+                try {
+                  await globalAudio.play();
+                  syncActiveCardUi();
+                } catch (err) {
+                  // Ignore harmless AbortError when user clicks another button while loading
+                  if (err.name === 'AbortError' || /interrupted by a call to pause|removed from the document/i.test(err.message || '')) {
+                    return;
+                  }
+                  if (activeFallbackUrl) {
+                    try {
+                      globalAudio.src = activeFallbackUrl;
+                      activeFallbackUrl = '';
+                      await globalAudio.play();
+                      syncActiveCardUi();
+                      return;
+                    } catch (err2) {}
+                  }
+                  showToast('Could not play audio: ' + err.message, true);
                 }
-                curLabel.textContent = formatTime(audioEl.currentTime);
               }
 
               function onAudioSeek(id, val) {
-                const audioEl = document.getElementById('audio-el-' + id);
-                if (audioEl) audioEl.currentTime = parseFloat(val);
-              }
-
-              function onAudioEnded(id) {
-                const btnEl = document.getElementById('play-btn-' + id);
-                const cardEl = document.getElementById('card-' + id);
-                if (cardEl) cardEl.classList.remove('playing');
-                if (btnEl) btnEl.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>`;
+                if (activeCardId === id && globalAudio.duration) {
+                  globalAudio.currentTime = parseFloat(val);
+                }
               }
 
               async function deleteAudioItem(id) {
@@ -1943,7 +2261,18 @@ jobs:
                 const dbF = document.getElementById('dbFilter').value;
                 const catF = document.getElementById('catFilter').value;
 
+                const newCount = allAudios.filter(a => !!a.isNewSession).length;
+                const oldCount = allAudios.filter(a => !a.isNewSession).length;
+                const elNew = document.getElementById('countNewBadge');
+                const elOld = document.getElementById('countOldBadge');
+                const elAll = document.getElementById('countAllBadge');
+                if (elNew) elNew.textContent = newCount;
+                if (elOld) elOld.textContent = oldCount;
+                if (elAll) elAll.textContent = allAudios.length;
+
                 const filtered = allAudios.filter(item => {
+                  if (libraryViewMode === 'NEW' && !item.isNewSession) return false;
+                  if (libraryViewMode === 'OLD' && item.isNewSession) return false;
                   if (dbF !== 'ALL' && item.dbName !== dbF) return false;
                   if (catF !== 'ALL' && item.category !== catF) return false;
                   if (q) {
@@ -1953,13 +2282,16 @@ jobs:
                   return true;
                 });
 
-                document.getElementById('audioCountBadge').textContent = `${filtered.length} Audio${filtered.length === 1 ? '' : 's'}`;
+                document.getElementById('audioCountBadge').textContent = `${filtered.length} Shown (${newCount} New / ${oldCount} Old)`;
 
                 if (!filtered.length) {
+                  const emptyMsg = libraryViewMode === 'NEW'
+                    ? `No new ringtones generated in this session yet. Enter prompts on the left and click Generate Audio Batch (or switch to "Old Firebase Queue (${oldCount})" above to browse older tones).`
+                    : `No matching ringtones found for current filter.`;
                   grid.innerHTML = `
                     <div class="empty-state">
                       <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 10v3"/><path d="M6 6v11"/><path d="M10 3v18"/><path d="M14 8v7"/><path d="M18 5v13"/><path d="M22 10v3"/></svg>
-                      <div>No matching ringtones found. Generate new tones on the left panel or adjust filters.</div>
+                      <div style="max-width:460px;">${escapeHtml(emptyMsg)}</div>
                     </div>`;
                   return;
                 }
@@ -1973,16 +2305,24 @@ jobs:
                     ? `Peak ${item.processing.peakAfterDb}dB | -${item.processing.trimmedSec || 0}s trim`
                     : (item.processed ? 'DSP Mastered' : 'Queued');
 
+                  const isNew = !!item.isNewSession;
+                  const originBadge = isNew
+                    ? `<span class="pill new-badge">NEW SESSION</span>`
+                    : `<span class="pill old-badge">OLD FIREBASE</span>`;
+                  const ageText = formatRelativeTime(item.createdAt);
+
                   return `
-                    <div class="audio-card" id="card-${escapeHtml(item.id)}">
+                    <div class="audio-card ${isNew ? 'is-new' : ''}" id="card-${escapeHtml(item.id)}">
                       <div class="card-top">
                         <div>
                           <div class="card-title">${escapeHtml(item.title || 'Untitled Tone')}</div>
                           <div class="card-badges">
+                            ${originBadge}
                             <span class="pill green">${escapeHtml(item.category || 'OTHER')}</span>
                             <span class="pill">${escapeHtml(dbBadge)}</span>
                             <span class="pill">${escapeHtml(durText)}</span>
                             <span class="pill">${escapeHtml(dspBadge)}</span>
+                            ${ageText ? `<span class="pill">${escapeHtml(ageText)}</span>` : ''}
                           </div>
                         </div>
                         <button class="btn btn-danger" style="padding:5px 8px;" onclick="deleteAudioItem('${escapeHtml(item.id)}')" title="Delete bad audio from Firebase and queue">
@@ -1992,7 +2332,7 @@ jobs:
                       </div>
 
                       <div class="player-box">
-                        <button type="button" class="play-btn" id="play-btn-${escapeHtml(item.id)}" onclick="togglePlayAudio('${escapeHtml(item.id)}', '${escapeHtml(streamUrl)}')">
+                        <button type="button" class="play-btn" id="play-btn-${escapeHtml(item.id)}" onclick="togglePlayAudio('${escapeHtml(item.id)}', '${escapeHtml(streamUrl)}', '${escapeHtml(item.fileUrl || '')}')">
                           <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
                         </button>
                         <div class="seek-wrap">
@@ -2002,10 +2342,6 @@ jobs:
                             <span id="time-dur-${escapeHtml(item.id)}">${escapeHtml(durText)}</span>
                           </div>
                         </div>
-                        <audio id="audio-el-${escapeHtml(item.id)}" preload="none"
-                          ontimeupdate="onAudioTimeUpdate('${escapeHtml(item.id)}')"
-                          onloadedmetadata="onAudioTimeUpdate('${escapeHtml(item.id)}')"
-                          onended="onAudioEnded('${escapeHtml(item.id)}')"></audio>
                       </div>
 
                       <div class="card-tags">
@@ -2032,13 +2368,77 @@ jobs:
                     </div>
                   `;
                 }).join('');
+                syncActiveCardUi();
+              }
+
+              let isStudioAuthenticated = false;
+
+              function togglePasswordVisibility() {
+                const inp = document.getElementById('studioPasswordInput');
+                const icon = document.getElementById('pwdEyeIcon');
+                if (inp.type === 'password') {
+                  inp.type = 'text';
+                  icon.innerHTML = `<path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/>`;
+                } else {
+                  inp.type = 'password';
+                  icon.innerHTML = `<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>`;
+                }
+              }
+
+              async function submitStudioLogin(e) {
+                e.preventDefault();
+                const errBox = document.getElementById('loginErrorBox');
+                const errTxt = document.getElementById('loginErrorText');
+                const btn = document.getElementById('loginSubmitBtn');
+                const pwd = document.getElementById('studioPasswordInput').value;
+                errBox.classList.remove('show');
+                btn.disabled = true;
+
+                try {
+                  const res = await fetch('/api/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ password: pwd })
+                  });
+                  const data = await res.json().catch(() => ({}));
+                  if (!res.ok) {
+                    errTxt.textContent = data.error || 'Incorrect password. Please try again.';
+                    errBox.classList.add('show');
+                    return;
+                  }
+                  isStudioAuthenticated = true;
+                  document.getElementById('loginOverlay').classList.add('hidden');
+                  document.getElementById('studioPasswordInput').value = '';
+                  showToast('Studio unlocked');
+                  pollState();
+                } catch (err) {
+                  errTxt.textContent = 'Connection error: ' + err.message;
+                  errBox.classList.add('show');
+                } finally {
+                  btn.disabled = false;
+                }
+              }
+
+              async function lockStudioSession() {
+                stopAllAudio();
+                try { await fetch('/api/logout', { method: 'POST' }); } catch (e) {}
+                isStudioAuthenticated = false;
+                document.getElementById('loginOverlay').classList.remove('hidden');
+                showToast('Studio locked');
               }
 
               let initializedConfig = false;
               async function pollState() {
                 try {
                   const res = await fetch('/api/state');
+                  if (res.status === 401) {
+                    isStudioAuthenticated = false;
+                    document.getElementById('loginOverlay').classList.remove('hidden');
+                    return;
+                  }
                   if (!res.ok) return;
+                  isStudioAuthenticated = true;
+                  document.getElementById('loginOverlay').classList.add('hidden');
                   const data = await res.json();
 
                   if (!initializedConfig && data.config) {
@@ -2104,13 +2504,14 @@ jobs:
                     term.scrollTop = term.scrollHeight;
                   }
 
-                  // Audios
-                  if (Array.isArray(data.audios) && data.audios.length !== allAudios.length && !activeAudioEl) {
-                    allAudios = data.audios;
-                    renderAudioGrid();
-                  } else if (Array.isArray(data.audios) && data.audios.length > allAudios.length) {
-                    allAudios = data.audios;
-                    renderAudioGrid();
+                  // Audios — only re-render DOM when items are added/removed/edited; globalAudio keeps playing uninterrupted
+                  if (Array.isArray(data.audios)) {
+                    const sig = data.audios.map(a => `${a.id}:${a.title}:${a.category}:${a.isNewSession ? 1 : 0}`).join('|');
+                    if (sig !== lastAudioSignature) {
+                      lastAudioSignature = sig;
+                      allAudios = data.audios;
+                      renderAudioGrid();
+                    }
                   }
                 } catch (e) {}
               }
@@ -2143,6 +2544,7 @@ jobs:
           import fs from 'fs';
           import path from 'path';
           import http from 'http';
+          import crypto from 'crypto';
           import { execSync, spawn } from 'child_process';
           import { createRequire } from 'module';
 
@@ -2159,6 +2561,33 @@ jobs:
           const INITIAL_PAD_MS       = parseInt(process.env.PAD_MS || '100', 10);
           const STUDIO_PORT          = parseInt(process.env.STUDIO_PORT || '8787', 10);
           const STUDIO_MAX_MINUTES   = parseInt(process.env.STUDIO_MAX_MINUTES || '180', 10);
+          const STUDIO_PASSWORD      = (process.env.STUDIO_PASSWORD || '').trim() || ('Studio-' + crypto.randomBytes(4).toString('hex'));
+          const STUDIO_AUTH_SECRET   = crypto.randomBytes(32).toString('hex');
+          const STUDIO_AUTH_TOKEN    = crypto.createHmac('sha256', STUDIO_AUTH_SECRET).update(STUDIO_PASSWORD).digest('hex');
+
+          function parseCookiesHeader(cookieStr = '') {
+            const out = {};
+            for (const part of String(cookieStr || '').split(';')) {
+              const idx = part.indexOf('=');
+              if (idx > 0) {
+                const k = part.slice(0, idx).trim();
+                const v = part.slice(idx + 1).trim();
+                out[k] = v;
+              }
+            }
+            return out;
+          }
+
+          function isRequestAuthenticated(req) {
+            const cookies = parseCookiesHeader(req.headers.cookie || '');
+            const candidate = cookies['studio_auth'] || req.headers['x-studio-token'] || '';
+            if (!candidate || candidate.length !== STUDIO_AUTH_TOKEN.length) return false;
+            try {
+              return crypto.timingSafeEqual(Buffer.from(candidate), Buffer.from(STUDIO_AUTH_TOKEN));
+            } catch {
+              return false;
+            }
+          }
 
           const AUDIO_CACHE_DIR = '/tmp/studio_audio_cache';
           fs.mkdirSync(AUDIO_CACHE_DIR, { recursive: true });
@@ -2756,14 +3185,50 @@ jobs:
             const isShort = durSec < 6 || cfg.soundType === 'Notification';
             const soundTypeLabel = isShort ? 'Short Notification/Alert Tone' : (cfg.soundType === 'Alarm' ? 'Progressive Wake-up Alarm Tone' : 'Full Melodic Ringtone');
 
-            const genres = ['Classical', 'Jazz', 'Acoustic Folk', 'Country', 'Reggae', 'Blues', 'Latin', 'Cinematic Orchestral', 'World Music', 'Celtic Harp', 'Tribal Percussion', 'Soul', 'Funk', 'Bluegrass', 'Flamenco', 'Bossa Nova', 'Ambient Nature', 'Baroque', 'Neo Soul', 'Indie Folk', 'Afrobeat', 'Synthwave', 'Lofi Hip-Hop'];
-            const instruments = ['Grand Piano', 'Violin', 'Trumpet', 'Saxophone', 'Cello', 'Acoustic Guitar', 'Sitar', 'Ukulele', 'Accordion', 'Harmonica', 'Flute', 'Djembe Drums', 'Music Box', 'Vibraphone', 'Kalimba', 'Steel Pan', 'Harp', 'Koto', 'Ocarina', 'Hang Drum', 'Rhodes Electric Piano'];
-            const moods = ['Peaceful', 'Energetic', 'Mysterious', 'Joyful', 'Melancholic', 'Heroic', 'Whimsical', 'Bright', 'Epic', 'Nostalgic', 'Rustic', 'Celestial', 'Graceful', 'Playful', 'Romantic', 'Triumphant', 'Serene'];
-            const structures = ['a catchy 3-note hook that repeats once and resolves', 'a rising build that peaks into a bright memorable motif', 'a call-and-response between two contrasting sounds', 'a seamless loop with a satisfying rhythmic groove', 'a gentle intro that blooms into a rich melodic phrase', 'a punchy opening with a sparkling slowly fading tail'];
+            const genres = ['Classical', 'Jazz', 'Acoustic Folk', 'Heavy Metal', 'Country', 'Reggae', 'Blues', 'Latin', 'Bollywood', 'Cinematic Orchestral', 'World Music', 'Celtic Harp', 'Tribal Percussion', 'Soul', 'Funk', 'Opera', 'Bluegrass', 'Flamenco', 'Bossa Nova', 'Salsa', 'Griot', 'Ambient Nature', 'Medieval', 'Renaissance', 'Baroque', 'Gospel', 'R&B', 'Trap Soul', 'Neo Soul', 'Indie Folk', 'Post-Rock', 'Afrobeat', 'K-Pop Instrumental', 'Synthwave', 'Lofi Hip-Hop'];
+            const instruments = ['Grand Piano', 'Violin', 'Trumpet', 'Saxophone', 'Cello', 'Acoustic Guitar', 'Sitar', 'Banjo', 'Ukulele', 'Accordion', 'Harmonica', 'Flute', 'Djembe Drums', 'Music Box', 'Vibraphone', 'Kalimba', 'Bagpipes', 'Steel Pan', 'Harp', 'Didgeridoo', 'Koto', 'Ocarina', 'Lute', 'Tambourine', 'Erhu', 'Duduk', 'Hurdy Gurdy', 'Hang Drum', 'Electric Sitar', 'Theremin', 'Rhodes Electric Piano'];
+            const moods = ['Peaceful', 'Energetic', 'Mysterious', 'Joyful', 'Melancholic', 'Heroic', 'Whimsical', 'Dark', 'Bright', 'Epic', 'Spooky', 'Nostalgic', 'Rustic', 'Celestial', 'Primal', 'Graceful', 'Intense', 'Playful', 'Romantic', 'Triumphant', 'Haunting', 'Serene', 'Frantic', 'Dreamlike'];
+            const animals = ['Lion Roar', 'Elephant Trumpet', 'Wolf Howl', 'Whale Song', 'Tropical Birds', 'Eagle Cry', 'Owl Hoot', 'Cat Purr/Meow', 'Dog Barking', 'Horse Neigh', 'Dolphin Click', 'Frog Croak', 'Cricket Chirp', 'Cicada Buzz', 'Fox Scream', 'Bear Growl', 'Humpback Whale', 'Cheetah Chirp', 'Snow Leopard', 'Parrot Mimicry'];
+            const comedy = ['Slapstick Cartoon', 'Silly Laugh', 'Meme Sound', 'Clown Horn', 'Funny Sneeze', 'Ridiculous Voice', 'Boing Spring', 'Honk', 'Slide Whistle', 'Fail Horn', 'Trombone Wah-Wah', 'Cartoon Run', 'Squeaky Toy', 'Price Is Right Fail', 'Game Show Buzz'];
+            const nature = ['Thunderstorm', 'Ocean Waves', 'Heavy Rain', 'Wind Through Trees', 'Fire Crackling', 'Water Waterfall', 'Avalanche Rumble', 'Bamboo Forest', 'Northern Lights (Aurora Hum)', 'Cave Dripping', 'Earthquake Rumble', 'Tornado Warning', 'Spring Birds Dawn', 'Desert Wind'];
+            const sciFi = ['Laser Blast', 'Robot Voice', 'Spaceship Engine', 'Alien Transmission', 'Cybernetic Hum', 'Time Travel Portal', 'Digital Power Up', 'Warning Siren', 'Quantum Computer', 'Warp Drive', 'Hologram Flicker', 'AI Awakening', 'Plasma Shield', 'Nanobots Swarm'];
+            const situations = ['Morning Wake-up Alarm', 'Subtle Office Notification', 'High-Energy Gaming Alert', 'Relaxing Spa Background', 'Urgent Siren Style', 'Magical Fantasy Pickup', 'Spooky Haunted House', 'Satisfying ASMR Click', 'Gym Workout Hype', 'Late Night Study', 'Road Trip Energy', 'Cooking Kitchen Ambience', 'Sports Victory Fanfare'];
+            const topics = ['Cyberpunk City', 'Deep Space', 'Ancient Temple', 'Undersea Kingdom', 'Industrial Factory', 'Enchanted Forest', 'Virtual Reality', 'Desert Caravan', 'Steam Engine', 'Viking Voyage', 'Samurai Dojo', 'Aztec Pyramid', 'Arctic Expedition', 'Silk Road Journey', 'Pirate Ship'];
+            const actions = ['Whirring', 'Echoing', 'Resonating', 'Pulsing', 'Shimmering', 'Crashing', 'Whispering', 'Thumping', 'Gliding', 'Swirling', 'Exploding', 'Dissolving', 'Spiraling', 'Cascading', 'Vibrating'];
+            const adjectives = ['Metallic', 'Ethereal', 'Rusty', 'Crystal', 'Shadowy', 'Luminous', 'Velvet', 'Frozen', 'Golden', 'Electric', 'Obsidian', 'Neon', 'Ancient', 'Celestial', 'Molten'];
+            const horror = ['Creaking Door', 'Heartbeat Accelerating', 'Distant Screaming', 'Ghostly Whisper', 'Dripping Blood', 'Demon Growl', 'Haunted Music Box', 'Church Bell at Midnight', 'Eerie Silence Breaking', 'Zombie Horde'];
+            const sports = ['Stadium Crowd Roar', 'Starting Pistol', 'Basketball Swoosh', 'Soccer Goal Celebration', 'Boxing Bell', 'Race Car Engine', 'Skateboard Tricks', 'Weightlifting Grunt', 'Swimming Splash', 'Tennis Ace'];
+            const romance = ['Soft Piano Serenade', 'Violin Love Theme', 'Heartbeat in Sync', 'Candlelight Jazz', 'Acoustic Love Song', 'Wedding Bells', 'Slow Dance Waltz', 'Sunset Guitar', 'Gentle Harp Melody', 'Whispering Lovers'];
+            const cultural = ['Indian Tabla Fusion', 'Japanese Shamisen', 'African Djembe Circle', 'Irish Jig', 'Arabic Oud Solo', 'Chinese Pipa Melody', 'Cuban Conga Rhythm', 'Andean Panpipe', 'Mongolian Throat Singing', 'Greek Bouzouki'];
+            const kids = ['Playful Xylophone', 'Cartoon Adventure', 'Lullaby Box', 'Silly Monster', 'Magic Toy Land', 'Bubble Pop Fun', 'Playground Melody', 'Rainbow Song', 'Counting Stars', 'Happy Elephant'];
+            const asmr = ['Keyboard Typing', 'Paper Turning Pages', 'Rain on Window', 'Whispering Voice', 'Sand Pouring', 'Crunching Leaves', 'Hair Brushing', 'Soft Tapping', 'Coffee Brewing', 'Crackling Fireplace'];
+            const epic = ['Orchestral Battle March', 'Choir of Warriors', 'Dragon Theme', 'Kingdom Rising', 'Final Boss Theme', 'Hero Transformation', 'Galaxy Explosion', 'Ancient Gods Awakening', 'Legendary Sword Unsheathing', 'Apocalypse Dawn'];
+            const urban = ['City Traffic Jazz', 'Subway Beat', 'Hip-Hop Street', 'Breakbeat Alley', 'Night Club Bass', 'Graffiti Art Funk', 'Skyscraper Wind', 'Street Vendor Rhythm', 'Neon Market', 'Urban Jungle Groove'];
+            const structures = ['a catchy 3-note hook that repeats once and resolves', 'a rising build that peaks into a bright memorable motif', 'a call-and-response between two contrasting sounds', 'a seamless loop with a satisfying rhythmic groove', 'a gentle intro that blooms into a rich melodic phrase', 'a punchy opening with a sparkling, slowly fading tail', 'a playful question-answer melody that ends on a high note', 'a hypnotic repeating figure with one surprising accent'];
             const productions = ['warm analog studio polish', 'crisp modern cinematic production', 'intimate close-mic organic recording', 'lush layered stereo depth', 'punchy radio-ready mix', 'airy minimalist production with real room ambience'];
             const tempos = ['90 BPM relaxed groove', '108 BPM mid-tempo groove', '120 BPM upbeat and bouncy', '128 BPM energetic pulse', '80 BPM slow and spacious'];
 
-            const chosenGenre = (cfg.genre && cfg.genre !== 'Auto') ? cfg.genre : pickFresh(genres, 'genres');
+            const THEME_BUILDERS = {
+              Musical:    () => `Style: ${pickFresh(genres, 'genres')} | Lead: ${pickFresh(instruments, 'instruments')} | Mood: ${pickFresh(moods, 'moods')}`,
+              Animal:     () => `Type: Animal Sound (Musical Translation) | Focus: ${pickFresh(animals, 'animals')} | Mood: ${pickFresh(moods, 'moods')}`,
+              Comedy:     () => `Type: Comedy/Funny | Sound: ${pickFresh(comedy, 'comedy')} | Character: ${pickFresh(moods, 'moods')}`,
+              SciFi:      () => `Type: Sci-Fi / Futuristic | Element: ${pickFresh(sciFi, 'sciFi')} | Vibe: ${pickFresh(moods, 'moods')}`,
+              Situation:  () => `Purpose: ${pickFresh(situations, 'situations')} | Atmosphere: ${pickFresh(moods, 'moods')}`,
+              SmartTopic: () => `Creative Topic: ${pickFresh(adjectives, 'adjectives')} ${pickFresh(topics, 'topics')} ${pickFresh(actions, 'actions')}`,
+              Horror:     () => `Type: Horror/Suspense | Sound: ${pickFresh(horror, 'horror')} | Mood: ${pickFresh(moods, 'moods')}`,
+              Sports:     () => `Type: Sports/Action | Sound: ${pickFresh(sports, 'sports')} | Energy: ${pickFresh(moods, 'moods')}`,
+              Romance:    () => `Type: Romantic/Emotional | Theme: ${pickFresh(romance, 'romance')} | Mood: ${pickFresh(moods, 'moods')}`,
+              Cultural:   () => `Type: World/Cultural Music | Style: ${pickFresh(cultural, 'cultural')} | Mood: ${pickFresh(moods, 'moods')}`,
+              Kids:       () => `Type: Children/Playful | Theme: ${pickFresh(kids, 'kids')} | Mood: Joyful and Energetic`,
+              ASMR:       () => `Type: ASMR/Relaxing Sounds | Sound: ${pickFresh(asmr, 'asmr')} | Texture: Ultra HD, highly detailed`,
+              Epic:       () => `Type: Epic/Cinematic | Theme: ${pickFresh(epic, 'epic')} | Scale: Grand and Powerful`,
+              Urban:      () => `Type: Urban/Street | Vibe: ${pickFresh(urban, 'urban')} | Mood: ${pickFresh(moods, 'moods')}`,
+              Nature:     () => `Type: Nature Soundscape | Element: ${pickFresh(nature, 'nature')} | Intensity: High`
+            };
+
+            const selectedPath = drawPath(Object.keys(THEME_BUILDERS));
+            const mandatoryTheme = THEME_BUILDERS[selectedPath]();
+            const chosenGenre = (cfg.genre && cfg.genre !== 'Auto') ? cfg.genre : `${selectedPath} (${mandatoryTheme})`;
             const chosenInst  = (cfg.instruments && cfg.instruments !== 'Auto') ? cfg.instruments : pickFresh(instruments, 'instruments');
             const chosenMood  = (cfg.mood && cfg.mood !== 'Auto') ? cfg.mood : pickFresh(moods, 'moods');
             const chosenBpm   = (cfg.bpm && cfg.bpm !== 'Auto') ? `${cfg.bpm} BPM` : tempos[Math.floor(Math.random() * tempos.length)];
@@ -3078,19 +3543,22 @@ jobs:
             await sleep(250 + Math.floor(Math.random() * 150));
           }
 
+          // ─── AUTO ACCOUNT CREATION (Patchright + Real Chrome + WARP + OTP) ─────────
           async function createStableAudioAccount() {
             let patchrightChromium = null;
             try {
               const pr = await import('patchright');
               patchrightChromium = pr.chromium;
-              console.log('  Using Patchright (CDP-patched undetected Chromium driver)');
+              console.log('  🛡️ Using Patchright (CDP-patched undetected Chromium driver)');
             } catch {
               const pw = await import('playwright');
               patchrightChromium = pw.chromium;
-              console.log('  Patchright not found — falling back to Playwright Chromium');
+              console.log('  ⚠️ Patchright not found — falling back to Playwright Chromium');
             }
 
             const warpProxy = (process.env.WARP_PROXY || '').trim();
+            // All attempts use a real Temp-Mail inbox because WorkOS AuthKit always asks
+            // "Verify your email" (6-digit OTP) right after /sign-up/password!
             const strategies = [
               { useWarp: !!warpProxy, label: warpProxy ? 'WARP Proxy + Real Temp-Mail OTP' : 'Direct + Real Temp-Mail OTP' },
               { useWarp: !!warpProxy, label: warpProxy ? 'WARP Proxy + Real Temp-Mail OTP (Retry)' : 'Direct + Real Temp-Mail OTP (Retry)' },
@@ -3105,14 +3573,15 @@ jobs:
               try {
                 inbox = await createTempMailAccount();
               } catch (mailErr) {
-                console.warn(`  Could not create temp-mail inbox on attempt ${attempt}: ${mailErr.message}`);
+                console.warn(`  ⚠️ Could not create temp-mail inbox on attempt ${attempt}: ${mailErr.message}`);
                 if (attempt < strategies.length) continue;
                 throw mailErr;
               }
               const { email } = inbox;
 
-              console.log(`\n  AUTO ACCOUNT CREATION STARTED (Attempt ${attempt}/${strategies.length}: ${strat.label})`);
-              console.log(`  Email   : ${email}`);
+              console.log(`\n  🤖 AUTO ACCOUNT CREATION STARTED (Attempt ${attempt}/${strategies.length}: ${strat.label})`);
+              console.log(`  📧 Email   : ${email}`);
+              console.log(`  🔑 Password: ${password}`);
 
               const profileDir = `/tmp/sa_chrome_profile_${Date.now()}_${attempt}`;
               fs.mkdirSync(profileDir, { recursive: true });
@@ -3120,7 +3589,7 @@ jobs:
               const launchOpts = {
                 channel: 'chrome',
                 headless: false,
-                viewport: null,
+                viewport: null, // Patchright best practice: do NOT inject custom viewport or fake Windows UA on Linux
                 args: [
                   '--no-sandbox',
                   '--disable-setuid-sandbox',
@@ -3130,6 +3599,7 @@ jobs:
               };
               if (strat.useWarp && warpProxy) {
                 launchOpts.proxy = { server: warpProxy };
+                console.log(`  🌐 Routing browser through Cloudflare WARP proxy (${warpProxy})...`);
               }
 
               let context = null;
@@ -3144,13 +3614,14 @@ jobs:
                 let capturedToken = null;
                 const page = context.pages()[0] || await context.newPage();
 
+                // ── Node-side Network Interception (100% invisible to WorkOS Radar) ──
                 context.on('request', req => {
                   const auth = req.headers()['authorization'];
                   if (auth && auth.startsWith('Bearer ')) {
                     const tok = auth.replace('Bearer ', '').trim();
                     if (tok.length > 40 && !capturedToken) {
                       capturedToken = tok;
-                      console.log(`  Token captured from outgoing request!`);
+                      console.log(`  🔑 Token captured from outgoing request (${req.url().slice(0, 60)})!`);
                     }
                   }
                 });
@@ -3158,6 +3629,10 @@ jobs:
                 context.on('response', async resp => {
                   try {
                     const url = resp.url();
+                    if (url.includes('authkit.app') && resp.status() >= 400) {
+                      const errBody = await resp.text().catch(() => '');
+                      console.warn(`  ⚠️ AuthKit HTTP ${resp.status()} on ${url.split('?')[0]}: ${errBody.slice(0, 200)}`);
+                    }
                     const isTokenEndpoint =
                       url.includes('/oauth/token') ||
                       url.includes('/token') ||
@@ -3174,16 +3649,23 @@ jobs:
                         const tok = json?.access_token || json?.accessToken || json?.token || json?.id_token || json?.data?.access_token;
                         if (tok && typeof tok === 'string' && tok.length > 40 && !capturedToken) {
                           capturedToken = tok;
-                          console.log(`  Token captured from auth response!`);
+                          console.log(`  🔑 Token captured from auth response (${url.slice(0, 60)})!`);
                         }
                       }
                     }
                   } catch {}
                 });
 
+                // ── Step 1: Load Stable Audio fresh ───────────────────────────────────
+                console.log('  🌐 Step 1: Loading fresh Stable Audio page...');
                 await page.goto('https://stableaudio.com', { waitUntil: 'domcontentloaded', timeout: 30000 });
                 await sleep(2500 + Math.floor(Math.random() * 1000));
 
+                await page.mouse.move(300 + Math.random() * 200, 250 + Math.random() * 150, { steps: 10 });
+                await sleep(500);
+
+                // ── Step 2: Click Sign Up button (target VISIBLE button, fallback to DOM click) ─────
+                console.log('  🖱️  Step 2: Clicking Sign Up button...');
                 const visibleSignupLoc = page.locator(
                   'button:has-text("Sign up"):visible, button:has-text("Sign Up"):visible, a:has-text("Sign up"):visible, a:has-text("Sign Up"):visible, [data-testid="signup"]:visible'
                 ).first();
@@ -3191,7 +3673,9 @@ jobs:
                 const isVis = await visibleSignupLoc.waitFor({ state: 'visible', timeout: 8000 }).then(() => true).catch(() => false);
                 if (isVis) {
                   await humanClick(page, visibleSignupLoc);
+                  console.log('  ✅ Sign Up clicked (visible button)');
                 } else {
+                  console.log('  ⚠️ Visible Sign Up button not directly matched — triggering DOM click...');
                   await page.evaluate(() => {
                     const els = [...document.querySelectorAll('button, a')].filter(el =>
                       /^\s*sign\s*up\s*$/i.test(el.innerText || el.textContent || '')
@@ -3199,58 +3683,81 @@ jobs:
                     const vis = els.find(el => el.offsetParent !== null) || els[0];
                     if (vis) vis.click();
                   });
+                  console.log('  ✅ Sign Up triggered via DOM click');
                 }
 
                 await sleep(3000);
                 await page.waitForLoadState('networkidle', { timeout: 12000 }).catch(() => {});
 
+                // ── Step 3: Fill Email on /sign-up ───────────────────────────────────
+                console.log(`  📝 Step 3: On AuthKit page (${page.url().split('?')[0]})...`);
                 const emailLoc = page.locator('input[name="email"], input[type="email"], input[autocomplete="email"]').first();
                 await emailLoc.waitFor({ state: 'visible', timeout: 20000 });
-                await sleep(800);
+
+                await sleep(800 + Math.floor(Math.random() * 600));
 
                 const firstLoc = page.locator('input[name="first_name"], input[name="firstName"]').first();
-                if (await firstLoc.isVisible().catch(() => false)) await humanType(page, firstLoc, 'Alex');
+                if (await firstLoc.isVisible().catch(() => false)) {
+                  await humanType(page, firstLoc, 'Alex');
+                }
                 const lastLoc = page.locator('input[name="last_name"], input[name="lastName"]').first();
-                if (await lastLoc.isVisible().catch(() => false)) await humanType(page, lastLoc, 'Carter');
+                if (await lastLoc.isVisible().catch(() => false)) {
+                  await humanType(page, lastLoc, 'Carter');
+                }
 
+                console.log('  ✍️  Step 4: Typing email with human keystroke cadence...');
                 await humanType(page, emailLoc, email);
-                await sleep(500);
+                await sleep(500 + Math.floor(Math.random() * 400));
 
                 const passLoc = page.locator('input[name="password"], input[type="password"]').first();
                 const passVisibleOnStep1 = await passLoc.isVisible().catch(() => false);
 
                 if (!passVisibleOnStep1) {
+                  console.log('  ➡️  Submitting email step (real mouse click on Continue)...');
                   const continueBtn = page.locator('button.ak-PrimaryButton, button[type="submit"]:has-text("Continue"), form button[type="submit"]').first();
                   await humanClick(page, continueBtn);
+
+                  console.log('  🔑 Step 5: Waiting for /sign-up/password screen...');
                   await passLoc.waitFor({ state: 'visible', timeout: 20000 });
                   await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
-                  await sleep(1000);
+                  await sleep(1000 + Math.floor(Math.random() * 600));
                 }
 
+                // ── Step 6: Type Password & Submit with real hardware mouse click ────
+                console.log('  ✍️  Step 6: Typing password with human keystroke cadence...');
                 await humanType(page, passLoc, password);
-                await sleep(700);
+                await sleep(700 + Math.floor(Math.random() * 500));
 
+                console.log('  🚀 Step 7: Clicking Continue button on password form...');
                 const passContinueBtn = page.locator('button.ak-PrimaryButton, button[type="submit"]:has-text("Continue"), button[type="submit"]:has-text("Sign up")').first();
                 await humanClick(page, passContinueBtn);
 
+                // Wait up to 8s to transition away from /sign-up/password (to /email-verification or stableaudio.com)
                 for (let w = 0; w < 16; w++) {
                   await sleep(500);
                   if (isStableAudioHost(page.url()) || capturedToken) break;
                   if (!page.url().includes('/sign-up/password')) break;
                 }
 
+                // Check for REAL error alerts (specifically ignore "Verify your email", which is the OTP screen!)
                 const alertLoc = page.locator('[role="alert"], .ak-Error, [data-accent-color="red"]').first();
                 let isVerifyEmailScreen = false;
                 if (!isStableAudioHost(page.url()) && await alertLoc.isVisible().catch(() => false)) {
                   const alertText = (await alertLoc.innerText().catch(() => '')).trim();
                   if (/verify your email|verification code|check your email|enter the.*code|sent.*code/i.test(alertText)) {
                     isVerifyEmailScreen = true;
+                    console.log(`  📩 AuthKit transitioned to Email Verification screen ("${alertText}")!`);
                   } else if (alertText && /blocked|contact support|invalid|disposable|not allowed|already|error|weak/i.test(alertText)) {
-                    if (attempt < strategies.length) continue;
+                    console.warn(`  ⚠️ AuthKit error alert on attempt ${attempt}: "${alertText}"`);
+                    if (attempt < strategies.length) {
+                      console.log('  🔄 Switching to next strategy...');
+                      continue;
+                    }
                     throw new Error(`WorkOS Radar blocked signup: ${alertText}`);
                   }
                 }
 
+                // ── Step 7b: Handle "Verify your email" (6-digit OTP screen) ─────────
                 const otpLoc = page.locator('input[name="code"], input[autocomplete="one-time-code"], input[inputmode="numeric"], input[maxlength="1"], input[maxlength="6"]').first();
                 const onVerifyPage =
                   isVerifyEmailScreen ||
@@ -3259,19 +3766,26 @@ jobs:
                   (await otpLoc.isVisible().catch(() => false));
 
                 if (!isStableAudioHost(page.url()) && onVerifyPage) {
+                  console.log(`  📩 Step 7b: On Email Verification screen (${page.url().split('?')[0]}) — waiting for OTP email...`);
                   const otp = await pollTempMailForOtp(inbox, 60000);
                   if (!otp) {
+                    console.warn(`  ⚠️ Did not receive OTP email within 60s on attempt ${attempt}.`);
                     if (attempt < strategies.length) continue;
-                    throw new Error('Timed out waiting for 6-digit OTP email.');
+                    throw new Error('Timed out waiting for 6-digit OTP email from WorkOS AuthKit.');
                   }
 
+                  console.log(`  🔢 Received 6-digit OTP code: ${otp} — entering code into AuthKit...`);
                   await sleep(1000);
+
+                  // Strategy 1: DOM Property & Event Injection (handles transparent input-otp, 6 boxes, and paste event)
                   try {
                     await page.evaluate((code) => {
                       const allInputs = Array.from(document.querySelectorAll('input')).filter(el => {
                         const t = (el.getAttribute('type') || '').toLowerCase();
                         return t !== 'hidden' && t !== 'checkbox' && t !== 'radio';
                       });
+
+                      // Case 1A: 6 individual boxes
                       if (allInputs.length === 6) {
                         for (let i = 0; i < 6; i++) {
                           const inp = allInputs[i];
@@ -3281,8 +3795,11 @@ jobs:
                           else inp.value = code[i];
                           inp.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
                           inp.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
+                          inp.dispatchEvent(new KeyboardEvent('keyup', { key: code[i], bubbles: true }));
                         }
                       }
+
+                      // Case 1B: Single input (input-otp, name="code", etc.)
                       const targetInput = document.querySelector('input[autocomplete="one-time-code"], input[name="code"], input[data-input-otp], input[inputmode="numeric"]') || (allInputs.length === 1 ? allInputs[0] : null);
                       if (targetInput) {
                         targetInput.focus();
@@ -3292,9 +3809,21 @@ jobs:
                         targetInput.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
                         targetInput.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
                       }
-                    }, otp);
-                  } catch {}
 
+                      // Case 1C: Clipboard paste event
+                      const pasteTarget = targetInput || allInputs[0] || document.querySelector('[data-input-otp-container], form') || document.activeElement;
+                      if (pasteTarget) {
+                        const dt = new DataTransfer();
+                        dt.setData('text/plain', code);
+                        const pasteEvt = new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true });
+                        pasteTarget.dispatchEvent(pasteEvt);
+                      }
+                    }, otp);
+                  } catch (e) {
+                    console.warn(`  ⚠️ DOM injection notice: ${e.message}`);
+                  }
+
+                  // Strategy 2: Native Playwright Focus & Type/Fill
                   try {
                     const separateInputs = page.locator('input[maxlength="1"]');
                     const sepCount = await separateInputs.count().catch(() => 0);
@@ -3309,36 +3838,91 @@ jobs:
                       const inputToClick = page.locator('input:not([type="hidden"]), [data-input-otp-container], [data-input-otp-slot], form').first();
                       if (await inputToClick.isVisible().catch(() => false)) {
                         await humanClick(page, inputToClick).catch(() => inputToClick.click({ force: true }));
+                      } else {
+                        await page.locator('input').first().focus({ force: true }).catch(() => {});
                       }
                       await sleep(200);
                       for (const digit of otp) {
-                        await page.keyboard.type(digit, { delay: 65 });
+                        await page.keyboard.type(digit, { delay: 60 + Math.floor(Math.random() * 40) });
                         await sleep(40);
                       }
                     }
-                  } catch {}
+                  } catch (typeErr) {
+                    console.warn(`  ⚠️ Keystroke entry: ${typeErr.message}`);
+                  }
 
                   await sleep(1500);
+
+                  // ── Submit OTP ──
                   if (!isStableAudioHost(page.url())) {
-                    const submitBtn = page.locator('button[type="submit"], button:has-text("Verify"), button:has-text("Continue"), button.ak-PrimaryButton').first();
-                    if (await submitBtn.isVisible().catch(() => false)) {
-                      await humanClick(page, submitBtn).catch(() => submitBtn.click({ force: true }));
-                    } else {
+                    const submitSelectors = [
+                      'button[type="submit"]',
+                      'button:has-text("Verify")',
+                      'button:has-text("Continue")',
+                      'button:has-text("Confirm")',
+                      'button:has-text("Submit")',
+                      'button.ak-PrimaryButton',
+                      '.ak-Button--primary',
+                      '[data-testid="submit-button"]'
+                    ];
+                    let clicked = false;
+                    for (const sel of submitSelectors) {
+                      const btn = page.locator(sel).first();
+                      if (await btn.isVisible().catch(() => false)) {
+                        console.log(`  🖱️  Clicking submit button (${sel})...`);
+                        await humanClick(page, btn).catch(() => btn.click({ force: true }));
+                        clicked = true;
+                        break;
+                      }
+                    }
+                    if (!clicked) {
+                      console.log('  🖱️  Submitting form via requestSubmit / Enter key...');
+                      await page.evaluate(() => {
+                        const form = document.querySelector('form');
+                        if (form) {
+                          if (typeof form.requestSubmit === 'function') form.requestSubmit();
+                          else form.submit();
+                        }
+                      }).catch(() => {});
                       await page.keyboard.press('Enter').catch(() => {});
                     }
                   }
                   await sleep(3000);
                 }
 
+                // ── Step 8: Wait for redirect to stableaudio.com host ────────────────
                 if (!isStableAudioHost(page.url())) {
+                  console.log('  ⏳ Step 8: Waiting for redirect to stableaudio.com host...');
                   try {
                     await page.waitForURL(u => isStableAudioHost(u.toString()), { timeout: 40000 });
+                    console.log(`  ✅ Landed on stableaudio.com: ${page.url()}`);
                   } catch {
+                    const diag = await page.evaluate(() => {
+                      const alert = document.querySelector('[role="alert"], .ak-Error, [data-accent-color="red"], .error-message');
+                      const text = (document.body?.innerText || '').slice(0, 300).replace(/\s+/g, ' ');
+                      return { alert: alert ? alert.innerText.trim() : null, text };
+                    }).catch(() => ({ alert: null, text: '' }));
+                    if (diag.alert) console.warn(`  ⚠️ AuthKit alert on attempt ${attempt}: "${diag.alert}"`);
+                    console.warn(`  ⚠️ Did not reach stableaudio.com on attempt ${attempt} (at: ${page.url()}) [Page: "${diag.text}"]`);
                     if (attempt < strategies.length) continue;
                   }
+                } else {
+                  console.log(`  ✅ Landed on stableaudio.com: ${page.url()}`);
                 }
 
+                // Wait for OAuth ?code= cleanup if present (max 6s or until token is captured)
+                if (isStableAudioHost(page.url()) && page.url().includes('code=')) {
+                  console.log('  🔄 OAuth code exchange in progress — waiting...');
+                  for (let w = 0; w < 12; w++) {
+                    await sleep(500);
+                    if (!page.url().includes('code=') || (capturedToken && page.url().includes('/terms'))) break;
+                  }
+                }
+                await sleep(800);
+
+                // Handle /terms?onboarding=1 FAST without 30s Playwright action timeouts
                 if (isStableAudioHost(page.url()) && (page.url().includes('/terms') || page.url().includes('onboarding'))) {
+                  console.log('  📜 Accepting onboarding terms on stableaudio.com (fast mode)...');
                   await page.evaluate(() => {
                     document.querySelectorAll('input[type="checkbox"], button[role="checkbox"], [role="checkbox"]').forEach(el => {
                       const checked = el.checked === true || el.getAttribute('aria-checked') === 'true' || el.getAttribute('data-state') === 'checked';
@@ -3346,15 +3930,25 @@ jobs:
                     });
                   }).catch(() => {});
                   await sleep(400);
-                  const acceptBtn = page.locator('button:has-text("Accept"), button:has-text("Agree"), button:has-text("Continue"), button[type="submit"]').first();
+
+                  const acceptBtn = page.locator('button:has-text("Accept"), button:has-text("Agree"), button:has-text("Continue"), button:has-text("Get started"), button[type="submit"]').first();
                   await acceptBtn.click({ timeout: 2000, force: true }).catch(() => {});
                   await sleep(800);
                 }
 
-                if (capturedToken) return capturedToken;
+                // Instant exit if token was already captured from WorkOS /authenticate response!
+                if (capturedToken) {
+                  console.log('  ✅ NEW ACCOUNT CREATED SUCCESSFULLY (Fast Exit)');
+                  console.log(`  📧 ${email}`);
+                  console.log(`  🔑 Token: ${capturedToken.slice(0, 30)}...`);
+                  return capturedToken;
+                }
 
-                const tokenDeadline = Date.now() + 45000;
+                // ── Step 8c: Poll for token once on stableaudio.com ──────────────────
+                console.log('  🔍 Step 8c: Polling for token...');
+                const tokenDeadline = Date.now() + 50000;
                 let navigatedToGenerate = false;
+
                 while (!capturedToken && Date.now() < tokenDeadline) {
                   if (isStableAudioHost(page.url())) {
                     const storageToken = await page.evaluate(() => {
@@ -3363,10 +3957,14 @@ jobs:
                           const key = store.key(i);
                           if (!key) continue;
                           const raw = store.getItem(key) || '';
-                          if (/^eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(raw.trim())) return raw.trim();
+                          if (/^eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(raw.trim())) {
+                            return raw.trim();
+                          }
                           try {
                             const parsed = JSON.parse(raw);
-                            const tok = parsed?.body?.access_token || parsed?.access_token || parsed?.accessToken || parsed?.token || parsed?.idToken;
+                            const tok = parsed?.body?.access_token || parsed?.access_token || parsed?.accessToken ||
+                                        parsed?.token || parsed?.idToken || parsed?.id_token || parsed?.state?.token ||
+                                        parsed?.state?.accessToken;
                             if (tok && typeof tok === 'string' && tok.length > 40) return tok;
                           } catch {}
                         }
@@ -3376,30 +3974,46 @@ jobs:
                     }).catch(() => null);
                     if (storageToken) { capturedToken = storageToken; break; }
                   }
+
                   const cookies = await context.cookies().catch(() => []);
                   for (const c of cookies) {
                     if (/^eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(c.value)) {
                       capturedToken = c.value;
+                      console.log(`  🔑 JWT token captured from cookie (${c.name})!`);
                       break;
                     }
                   }
                   if (capturedToken) break;
-                  if (!navigatedToGenerate && isStableAudioHost(page.url()) && Date.now() > (tokenDeadline - 38000)) {
+
+                  if (!navigatedToGenerate && isStableAudioHost(page.url()) && Date.now() > (tokenDeadline - 42000)) {
                     navigatedToGenerate = true;
+                    console.log('  🌐 Navigating to stableaudio.com/generate to trigger API auth header...');
                     await page.goto('https://stableaudio.com/generate', { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
                   }
+
                   await sleep(1500);
                 }
 
-                if (capturedToken) return capturedToken;
-                if (attempt < strategies.length) continue;
-                throw new Error('Token not captured after all attempts.');
+                if (capturedToken) {
+                  console.log('  ✅ NEW ACCOUNT CREATED SUCCESSFULLY');
+                  console.log(`  📧 ${email}`);
+                  console.log(`  🔑 Token: ${capturedToken.slice(0, 30)}...`);
+                  return capturedToken;
+                }
+
+                if (attempt < strategies.length) {
+                  console.warn(`  ⚠️ Token not captured on attempt ${attempt}. Trying next strategy...`);
+                  continue;
+                }
+                throw new Error(`Token not captured after all ${strategies.length} attempts (final URL: ${page.url()}).`);
+
               } finally {
                 if (context) await context.close().catch(() => {});
                 try { fs.rmSync(profileDir, { recursive: true, force: true }); } catch {}
               }
             }
           }
+
 
           // ─── STABLE AUDIO API (WITH NEGATIVE PROMPT SUPPORT) ───────────────────────
           let currentToken = STABLE_AUDIO_TOKEN || null;
@@ -3720,6 +4334,7 @@ jobs:
                     audioSeed: rec.audioSeed ?? null,
                     processed: !!rec.processed,
                     processing: rec.processing || null,
+                    isNewSession: false,
                     createdAt: rec.createdAt || 0
                   });
                 }
@@ -3727,7 +4342,7 @@ jobs:
                 console.warn(`  Firebase sync notice (${dbName}): ${e.message}`);
               }
             }
-            STUDIO_AUDIOS.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+            STUDIO_AUDIOS.sort((a, b) => (b.isNewSession ? 1 : 0) - (a.isNewSession ? 1 : 0) || (b.createdAt || 0) - (a.createdAt || 0));
           }
 
           // ─── GENERATE ONE UNIQUE RINGTONE & PUSH TO FIREBASE ───────────────────────
@@ -3836,6 +4451,7 @@ jobs:
               audioSeed: seed,
               processed,
               processing,
+              isNewSession: true,
               createdAt
             };
             STUDIO_AUDIOS.unshift(studioItem);
@@ -3936,6 +4552,37 @@ jobs:
                 return res.end(html);
               }
 
+              if (req.method === 'POST' && u.pathname === '/api/login') {
+                const body = await readJsonBody(req);
+                const inputPwd = String(body.password || '').trim();
+                const expectedBuf = Buffer.from(STUDIO_PASSWORD);
+                const inputBuf = Buffer.from(inputPwd);
+                const match = expectedBuf.length === inputBuf.length && crypto.timingSafeEqual(expectedBuf, inputBuf);
+                if (!match) {
+                  await sleep(1200);
+                  return sendJson(res, 401, { error: 'Invalid studio password' });
+                }
+                res.writeHead(200, {
+                  'Content-Type': 'application/json; charset=utf-8',
+                  'Set-Cookie': `studio_auth=${STUDIO_AUTH_TOKEN}; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400`,
+                  'Cache-Control': 'no-store'
+                });
+                return res.end(JSON.stringify({ ok: true }));
+              }
+
+              if (req.method === 'POST' && u.pathname === '/api/logout') {
+                res.writeHead(200, {
+                  'Content-Type': 'application/json; charset=utf-8',
+                  'Set-Cookie': 'studio_auth=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0',
+                  'Cache-Control': 'no-store'
+                });
+                return res.end(JSON.stringify({ ok: true }));
+              }
+
+              if (u.pathname.startsWith('/api/') && !isRequestAuthenticated(req)) {
+                return sendJson(res, 401, { error: 'Unauthorized — Studio password required' });
+              }
+
               if (req.method === 'GET' && u.pathname === '/api/state') {
                 return sendJson(res, 200, {
                   config: STUDIO_CONFIG,
@@ -3956,37 +4603,54 @@ jobs:
                 const safeId = id.replace(/[^a-zA-Z0-9_-]/g, '');
                 const localFile = path.join(AUDIO_CACHE_DIR, `${safeId}.mp3`);
 
+                let buf = null;
                 if (safeId && fs.existsSync(localFile)) {
-                  const buf = fs.readFileSync(localFile);
-                  res.writeHead(200, {
-                    'Content-Type': 'audio/mpeg',
-                    'Content-Length': buf.length,
-                    'Accept-Ranges': 'bytes',
-                    'Cache-Control': 'public, max-age=3600'
-                  });
-                  return res.end(buf);
-                }
-
-                if (remoteUrl && /^https?:\/\//i.test(remoteUrl)) {
+                  buf = fs.readFileSync(localFile);
+                } else if (remoteUrl && /^https?:\/\//i.test(remoteUrl)) {
                   const r2Res = await fetch(remoteUrl);
                   if (!r2Res.ok) {
                     res.writeHead(404);
                     return res.end('Audio not found on R2');
                   }
-                  const buf = Buffer.from(await r2Res.arrayBuffer());
-                  if (safeId) {
+                  buf = Buffer.from(await r2Res.arrayBuffer());
+                  if (safeId && buf.length > 0) {
                     try { fs.writeFileSync(localFile, buf); } catch {}
                   }
-                  res.writeHead(200, {
-                    'Content-Type': 'audio/mpeg',
-                    'Content-Length': buf.length,
-                    'Accept-Ranges': 'bytes'
-                  });
-                  return res.end(buf);
                 }
 
-                res.writeHead(404);
-                return res.end('Audio source missing');
+                if (!buf) {
+                  res.writeHead(404);
+                  return res.end('Audio source missing');
+                }
+
+                const total = buf.length;
+                const rangeHeader = req.headers.range;
+                if (rangeHeader) {
+                  const parts = rangeHeader.replace(/bytes=/, '').split('-');
+                  const start = parseInt(parts[0], 10) || 0;
+                  const end = parts[1] ? Math.min(total - 1, parseInt(parts[1], 10)) : total - 1;
+                  if (start >= total || start > end) {
+                    res.writeHead(416, { 'Content-Range': `bytes */${total}` });
+                    return res.end();
+                  }
+                  const chunk = buf.subarray(start, end + 1);
+                  res.writeHead(206, {
+                    'Content-Range': `bytes ${start}-${end}/${total}`,
+                    'Accept-Ranges': 'bytes',
+                    'Content-Length': chunk.length,
+                    'Content-Type': 'audio/mpeg',
+                    'Cache-Control': 'public, max-age=3600'
+                  });
+                  return res.end(chunk);
+                }
+
+                res.writeHead(200, {
+                  'Content-Type': 'audio/mpeg',
+                  'Content-Length': total,
+                  'Accept-Ranges': 'bytes',
+                  'Cache-Control': 'public, max-age=3600'
+                });
+                return res.end(buf);
               }
 
               if (req.method === 'POST' && u.pathname === '/api/config') {
@@ -4189,6 +4853,7 @@ jobs:
           } else {
             console.log(`  LOCAL STUDIO PORT   : http://127.0.0.1:${STUDIO_PORT}`);
           }
+          console.log(`  STUDIO PASSWORD     : ${process.env.STUDIO_PASSWORD?.trim() ? '(Using your configured STUDIO_PASSWORD)' : STUDIO_PASSWORD}`);
           console.log(`  Gemini Transport    : Direct Web RPC (StreamGenerate — No Browser)`);
           console.log(`  Initial Auto-Count  : ${AUTO_GENERATE_COUNT}`);
           console.log(`  Duration            : ${INITIAL_LENGTH_SEC}s`);
