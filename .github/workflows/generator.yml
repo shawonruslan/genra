@@ -1261,18 +1261,39 @@ jobs:
                       <span>Tone Profile Mode</span>
                       <span class="field-hint">Auto-adjusts craft rules & duration</span>
                     </div>
-                    <div class="segmented">
-                      <button type="button" class="seg-btn active" id="mode-ringtone" onclick="setSoundMode('Ringtone', 25)">
+                    <div class="segmented" id="toneModeSeg">
+                      <button type="button" class="seg-btn active" id="mode-ringtone" onclick="setSoundMode('Ringtone', 20)">
                         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
                         Ringtone (Full)
                       </button>
-                      <button type="button" class="seg-btn" id="mode-notification" onclick="setSoundMode('Notification', 4)">
+                      <button type="button" class="seg-btn" id="mode-notification" onclick="setSoundMode('Notification', 3)">
                         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
                         Notification
                       </button>
                       <button type="button" class="seg-btn" id="mode-alarm" onclick="setSoundMode('Alarm', 20)">
                         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2 2"/><path d="M5 3 2 6"/><path d="m22 6-3-3"/></svg>
                         Alarm Tone
+                      </button>
+                    </div>
+                  </div>
+
+                  <div class="field-group">
+                    <div class="field-label">
+                      <span>Audio Shape (Stable Audio Wizard)</span>
+                      <span class="field-hint">Track / Seamless Loop / One-Shot SFX</span>
+                    </div>
+                    <div class="segmented" id="shapeModeSeg">
+                      <button type="button" class="seg-btn active" id="shape-track" onclick="setAudioShape('track')">
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 10v3"/><path d="M6 6v11"/><path d="M10 3v18"/><path d="M14 8v7"/><path d="M18 5v13"/><path d="M22 10v3"/></svg>
+                        Track
+                      </button>
+                      <button type="button" class="seg-btn" id="shape-loop" onclick="setAudioShape('loop')">
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
+                        Loop
+                      </button>
+                      <button type="button" class="seg-btn" id="shape-oneshot" onclick="setAudioShape('oneshot')">
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+                        One-Shot
                       </button>
                     </div>
                   </div>
@@ -1314,19 +1335,47 @@ jobs:
 
                   <div class="field-group">
                     <div class="field-label">
-                      <span>Duration per Audio (Seconds)</span>
-                      <span class="range-val" id="durationLabel">25s</span>
+                      <span>Desired Duration per Track (Seconds)</span>
+                      <span class="range-val" id="durationLabel">20s</span>
                     </div>
                     <div class="range-row">
-                      <input type="range" id="durationSlider" min="2" max="45" value="25" oninput="syncDuration(this.value)" />
+                      <input type="range" id="durationSlider" min="1" max="60" value="20" oninput="syncDuration(this.value)" />
                     </div>
-                    <div class="chips-wrap" style="margin-top:4px;">
-                      <span class="chip" onclick="syncDuration(3)">3s Alert</span>
-                      <span class="chip" onclick="syncDuration(4)">4s Chime</span>
-                      <span class="chip" onclick="syncDuration(5)">5s Tone</span>
-                      <span class="chip" onclick="syncDuration(15)">15s Short Loop</span>
-                      <span class="chip selected" onclick="syncDuration(25)">25s Ringtone</span>
-                      <span class="chip" onclick="syncDuration(30)">30s Full</span>
+                    <div class="chips-wrap" id="durationChips" style="margin-top:4px;">
+                      <span class="chip" data-sec="3" onclick="syncDuration(3)">3s One-Shot</span>
+                      <span class="chip" data-sec="4" onclick="syncDuration(4)">4s Chime</span>
+                      <span class="chip" data-sec="5" onclick="syncDuration(5)">5s Alert</span>
+                      <span class="chip" data-sec="15" onclick="syncDuration(15)">15s Short</span>
+                      <span class="chip selected" data-sec="20" onclick="syncDuration(20)">20s Loop/Track</span>
+                      <span class="chip" data-sec="25" onclick="syncDuration(25)">25s Ringtone</span>
+                      <span class="chip" data-sec="30" onclick="syncDuration(30)">30s Full</span>
+                    </div>
+                  </div>
+
+                  <div class="grid-2">
+                    <div class="field-group">
+                      <div class="field-label">
+                        <span>Tracks per Prompt (Takes)</span>
+                        <span class="field-hint">All saved to queue</span>
+                      </div>
+                      <select id="takesCountSelect" onchange="updateLineCount()">
+                        <option value="4" selected>4 Tracks (All 4 Takes)</option>
+                        <option value="3">3 Tracks</option>
+                        <option value="2">2 Tracks</option>
+                        <option value="1">1 Track</option>
+                      </select>
+                    </div>
+                    <div class="field-group">
+                      <div class="field-label">
+                        <span>Time Signature</span>
+                        <span class="field-hint">Wizard plan meter</span>
+                      </div>
+                      <select id="timeSignatureSelect">
+                        <option value="4/4" selected>4/4 (Standard)</option>
+                        <option value="3/4">3/4 (Waltz)</option>
+                        <option value="6/8">6/8 (Compound)</option>
+                        <option value="2/4">2/4 (March)</option>
+                      </select>
                     </div>
                   </div>
 
@@ -1439,16 +1488,37 @@ jobs:
 
                   <div class="grid-3">
                     <div class="field-group">
-                      <div class="field-label"><span>Musical Key</span></div>
+                      <div class="field-label"><span>Musical Scale / Key</span></div>
                       <select id="keySelect">
-                        <option value="Auto">Auto Key</option>
-                        <option value="C Major">C Major (Bright)</option>
-                        <option value="G Major">G Major (Warm)</option>
-                        <option value="D Major">D Major (Uplifting)</option>
-                        <option value="A Minor">A Minor (Pure)</option>
-                        <option value="D Minor">D Minor (Deep)</option>
-                        <option value="E Minor">E Minor (Moody)</option>
-                        <option value="Pentatonic Scale">Pentatonic (Clean)</option>
+                        <option value="Auto">Auto Scale</option>
+                        <optgroup label="Minor Scales">
+                          <option value="C Minor">C Minor</option>
+                          <option value="C# Minor">C# Minor</option>
+                          <option value="D Minor">D Minor</option>
+                          <option value="Eb Minor">Eb Minor</option>
+                          <option value="E Minor">E Minor</option>
+                          <option value="F Minor">F Minor</option>
+                          <option value="F# Minor">F# Minor</option>
+                          <option value="G Minor">G Minor</option>
+                          <option value="Ab Minor">Ab Minor</option>
+                          <option value="A Minor">A Minor</option>
+                          <option value="Bb Minor">Bb Minor</option>
+                          <option value="B Minor">B Minor</option>
+                        </optgroup>
+                        <optgroup label="Major Scales">
+                          <option value="C Major">C Major</option>
+                          <option value="Db Major">Db Major</option>
+                          <option value="D Major">D Major</option>
+                          <option value="Eb Major">Eb Major</option>
+                          <option value="E Major">E Major</option>
+                          <option value="F Major">F Major</option>
+                          <option value="Gb Major">Gb Major</option>
+                          <option value="G Major">G Major</option>
+                          <option value="Ab Major">Ab Major</option>
+                          <option value="A Major">A Major</option>
+                          <option value="Bb Major">Bb Major</option>
+                          <option value="B Major">B Major</option>
+                        </optgroup>
                       </select>
                     </div>
 
@@ -1546,10 +1616,21 @@ jobs:
                   <div class="toggle-row">
                     <div>
                       <div style="font-weight:600; font-size:12px;">FFmpeg Auto-Mastering Pipeline</div>
-                      <div class="field-hint">Silence trim + -1 dBFS peak normalization + brickwall limiter</div>
+                      <div class="field-hint">WAV to MP3 + -1 dBFS peak normalization + brickwall limiter</div>
                     </div>
                     <label class="switch">
                       <input type="checkbox" id="autoProcessToggle" checked />
+                      <span class="slider"></span>
+                    </label>
+                  </div>
+
+                  <div class="toggle-row">
+                    <div>
+                      <div style="font-weight:600; font-size:12px;">Trim Leading / Trailing Silence</div>
+                      <div class="field-hint">Off by default to keep exact desired duration &amp; seamless loops (always skipped in Loop mode)</div>
+                    </div>
+                    <label class="switch">
+                      <input type="checkbox" id="trimSilenceToggle" />
                       <span class="slider"></span>
                     </label>
                   </div>
@@ -1799,29 +1880,49 @@ jobs:
                 btn.classList.add('active');
               }
 
+              let audioShape = 'track';
+
               function setSoundMode(mode, defaultSec) {
                 soundMode = mode;
-                document.querySelectorAll('.seg-btn').forEach(b => b.classList.remove('active'));
-                document.getElementById('mode-' + mode.toLowerCase()).classList.add('active');
+                document.querySelectorAll('#toneModeSeg .seg-btn').forEach(b => b.classList.remove('active'));
+                const btn = document.getElementById('mode-' + mode.toLowerCase());
+                if (btn) btn.classList.add('active');
                 syncDuration(defaultSec);
+                if (mode === 'Notification') setAudioShape('oneshot', false);
+              }
+
+              function setAudioShape(shape, adjustDuration = true) {
+                audioShape = ['track', 'loop', 'oneshot'].includes(shape) ? shape : 'track';
+                document.querySelectorAll('#shapeModeSeg .seg-btn').forEach(b => b.classList.remove('active'));
+                const btn = document.getElementById('shape-' + audioShape);
+                if (btn) btn.classList.add('active');
+                if (adjustDuration) {
+                  if (audioShape === 'oneshot') syncDuration(3);
+                  else if (audioShape === 'loop' && parseInt(document.getElementById('durationSlider').value, 10) < 8) syncDuration(20);
+                }
               }
 
               function syncDuration(sec) {
-                const val = Math.max(2, Math.min(45, parseInt(sec, 10) || 25));
+                const val = Math.max(1, Math.min(60, parseInt(sec, 10) || 20));
                 document.getElementById('durationSlider').value = val;
                 document.getElementById('durationLabel').textContent = val + 's';
+                document.querySelectorAll('#durationChips .chip').forEach(ch => {
+                  ch.classList.toggle('selected', parseInt(ch.dataset.sec, 10) === val);
+                });
               }
 
               function updateLineCount() {
                 const raw = document.getElementById('promptsInput').value || '';
                 const lines = raw.split('\n').map(l => l.trim()).filter(Boolean);
+                const takes = parseInt(document.getElementById('takesCountSelect')?.value, 10) || 4;
                 document.getElementById('lineCountBadge').textContent = `${lines.length} Prompt Line${lines.length === 1 ? '' : 's'}`;
                 const btnLabel = document.getElementById('generateBtnLabel');
                 if (lines.length > 0) {
-                  btnLabel.textContent = `Generate ${lines.length} Queued Prompt${lines.length === 1 ? '' : 's'}`;
+                  const totalTracks = lines.length * takes;
+                  btnLabel.textContent = `Generate ${lines.length} Prompt${lines.length === 1 ? '' : 's'} (${totalTracks} Tracks)`;
                 } else {
                   const autoCnt = parseInt(document.getElementById('autoCountInput').value, 10) || 5;
-                  btnLabel.textContent = `Auto-Generate ${autoCnt} Smart Tones`;
+                  btnLabel.textContent = `Auto-Generate ${autoCnt} Prompts (${autoCnt * takes} Tracks)`;
                 }
               }
 
@@ -1940,7 +2041,10 @@ jobs:
                   prompts,
                   autoCount: parseInt(document.getElementById('autoCountInput').value, 10) || 5,
                   soundType: soundMode,
-                  lengthSeconds: parseInt(document.getElementById('durationSlider').value, 10) || 25,
+                  audioShape,
+                  takesCount: parseInt(document.getElementById('takesCountSelect').value, 10) || 4,
+                  timeSignature: document.getElementById('timeSignatureSelect').value || '4/4',
+                  lengthSeconds: parseInt(document.getElementById('durationSlider').value, 10) || 20,
                   targetAccount: document.getElementById('targetAccount').value,
                   useGeminiEnhancer: document.getElementById('useGeminiEnhancer').checked,
                   bpm: isBpmAuto ? 'Auto' : parseInt(document.getElementById('bpmSlider').value, 10),
@@ -1954,6 +2058,7 @@ jobs:
                   bannedWords: document.getElementById('bannedWordsInput').value.trim(),
                   masterPrompt: document.getElementById('masterPromptInput').value.trim(),
                   autoProcess: document.getElementById('autoProcessToggle').checked,
+                  trimSilence: document.getElementById('trimSilenceToggle').checked,
                   volumeBoostPct: parseInt(document.getElementById('volumeBoostSlider').value, 10) || 200,
                   silenceThreshold: parseFloat(document.getElementById('silenceSlider').value) || 0.02,
                   padMs: parseInt(document.getElementById('padMsInput').value, 10) || 100,
@@ -2321,6 +2426,9 @@ jobs:
                             <span class="pill green">${escapeHtml(item.category || 'OTHER')}</span>
                             <span class="pill">${escapeHtml(dbBadge)}</span>
                             <span class="pill">${escapeHtml(durText)}</span>
+                            ${item.audioShape ? `<span class="pill">${escapeHtml(item.audioShape === 'oneshot' ? 'One-Shot' : item.audioShape === 'loop' ? 'Loop' : 'Track')}</span>` : ''}
+                            ${item.musicalKey && item.musicalKey !== 'Auto' ? `<span class="pill">${escapeHtml(item.musicalKey)}</span>` : ''}
+                            ${item.takeIndex && item.takesTotal ? `<span class="pill">Take ${escapeHtml(String(item.takeIndex))}/${escapeHtml(String(item.takesTotal))}</span>` : ''}
                             <span class="pill">${escapeHtml(dspBadge)}</span>
                             ${ageText ? `<span class="pill">${escapeHtml(ageText)}</span>` : ''}
                           </div>
@@ -2451,6 +2559,11 @@ jobs:
                     document.getElementById('negativePromptInput').value = data.config.negativePrompt || defaultNegativePrompt;
                     document.getElementById('bannedWordsInput').value = data.config.bannedWords || defaultBannedWords;
                     if (data.config.targetAccount) document.getElementById('targetAccount').value = data.config.targetAccount;
+                    if (data.config.audioShape) setAudioShape(data.config.audioShape, false);
+                    if (data.config.takesCount) document.getElementById('takesCountSelect').value = String(data.config.takesCount);
+                    if (data.config.timeSignature) document.getElementById('timeSignatureSelect').value = data.config.timeSignature;
+                    if (data.config.musicalKey) document.getElementById('keySelect').value = data.config.musicalKey;
+                    if (data.config.trimSilence != null) document.getElementById('trimSilenceToggle').checked = !!data.config.trimSilence;
                     if (data.config.lengthSeconds) syncDuration(data.config.lengthSeconds);
                     if (data.config.volumeBoostPct) {
                       document.getElementById('volumeBoostSlider').value = data.config.volumeBoostPct;
@@ -2554,7 +2667,7 @@ jobs:
           const INITIAL_TARGET_ACC   = (process.env.TARGET_ACCOUNT || 'zedge_2').trim().toLowerCase();
           const QUEUE_PATH           = 'wallpaperQueue';
           const AUTO_GENERATE_COUNT  = parseInt(process.env.AUTO_GENERATE_COUNT || '10', 10);
-          const INITIAL_LENGTH_SEC   = parseInt(process.env.LENGTH_SECONDS || '5', 10);
+          const INITIAL_LENGTH_SEC   = parseInt(process.env.LENGTH_SECONDS || '20', 10);
           const INITIAL_AUTO_PROCESS = process.env.AUTO_PROCESS !== 'false';
           const INITIAL_BOOST_PCT    = parseInt(process.env.VOLUME_BOOST_PCT || '200', 10);
           const INITIAL_SILENCE_THR  = parseFloat(process.env.SILENCE_THRESHOLD || '0.02');
@@ -3131,6 +3244,9 @@ jobs:
             defaultBannedWords: DEFAULT_BANNED_WORDS,
             bannedWords: DEFAULT_BANNED_WORDS,
             soundType: INITIAL_LENGTH_SEC < 6 ? 'Notification' : 'Ringtone',
+            audioShape: INITIAL_LENGTH_SEC < 6 ? 'oneshot' : 'track',
+            takesCount: 4,
+            timeSignature: '4/4',
             lengthSeconds: INITIAL_LENGTH_SEC,
             targetAccount: INITIAL_TARGET_ACC,
             useGeminiEnhancer: true,
@@ -3142,6 +3258,7 @@ jobs:
             structure: 'Auto',
             production: 'crisp modern studio mastered production with clear mids',
             autoProcess: INITIAL_AUTO_PROCESS,
+            trimSilence: false,
             volumeBoostPct: INITIAL_BOOST_PCT,
             silenceThreshold: INITIAL_SILENCE_THR,
             padMs: INITIAL_PAD_MS,
@@ -3641,7 +3758,8 @@ jobs:
                       url.includes('workos') ||
                       url.includes('auth0') ||
                       url.includes('login.stableaudio') ||
-                      url.includes('api.stableaudio.com');
+                      url.includes('api.stableaudio.com') ||
+                      url.includes('sessions-api.stableaudio.com');
                     if (isTokenEndpoint && resp.status() === 200) {
                       const ct = resp.headers()['content-type'] || '';
                       if (ct.includes('json')) {
@@ -4015,54 +4133,99 @@ jobs:
           }
 
 
-          // ─── STABLE AUDIO API (WITH NEGATIVE PROMPT SUPPORT) ───────────────────────
+          // ─── STABLE AUDIO SESSIONS / WIZARD API (4 PARALLEL TRACKS, LOOP, ONE-SHOT, SCALE) ──
           let currentToken = STABLE_AUDIO_TOKEN || null;
+          const STABLE_AUDIO_DEVICE_ID = crypto.randomUUID();
+          const WIZARD_API_BASE = 'https://sessions-api.stableaudio.com/agents/wizard';
+
+          function buildWizardHeaders(extra = {}) {
+            return {
+              'Accept': '*/*',
+              'Authorization': `Bearer ${currentToken}`,
+              'Origin': 'https://stableaudio.com',
+              'Referer': 'https://stableaudio.com/',
+              'x-client': 'web',
+              'x-client-platform': 'chrome-158;windows',
+              'x-client-timezone': 'Asia/Dhaka',
+              'x-client-version': '02-09-2026',
+              'x-device-id': STABLE_AUDIO_DEVICE_ID,
+              ...extra
+            };
+          }
+
+          function buildStableAudioPrompt(basePrompt, opts = {}) {
+            let p = String(basePrompt || '').trim().replace(/\.+$/, '').trim();
+            const shape = String(opts.audioShape || STUDIO_CONFIG.audioShape || 'track').toLowerCase();
+            const key = String(opts.musicalKey || STUDIO_CONFIG.musicalKey || 'Auto').trim();
+            const bpm = opts.bpm ?? STUDIO_CONFIG.bpm;
+
+            if (bpm && bpm !== 'Auto' && !/\bbpm\b/i.test(p)) {
+              p += `, ${bpm} BPM`;
+            }
+            if (shape === 'loop' && !/\bloop\b/i.test(p)) {
+              p += ', loop';
+            } else if (shape === 'oneshot' && !/\bone[- ]?shot\b/i.test(p)) {
+              p += ', one-shot';
+            }
+            if (key && key !== 'Auto' && !new RegExp(`\\bin\\s+${key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(p)) {
+              p += `, in ${key}`;
+            }
+            return p + '.';
+          }
 
           async function generateStableAudio(prompt, lengthSeconds, opts = {}, isRetry = false) {
-            const customSeed = (opts.seed != null && Number(opts.seed) >= 0)
-              ? Number(opts.seed)
-              : (Math.floor(Math.random() * 65536) - 32768);
-            const negPrompt = String(opts.negativePrompt ?? STUDIO_CONFIG.negativePrompt ?? '').trim();
+            const durSec = Math.max(1, Math.min(60, parseInt(lengthSeconds, 10) || 20));
+            const shape = String(opts.audioShape || STUDIO_CONFIG.audioShape || 'track').toLowerCase();
+            const musicalKey = String(opts.musicalKey || STUDIO_CONFIG.musicalKey || 'Auto').trim();
+            const timeSignature = String(opts.timeSignature || STUDIO_CONFIG.timeSignature || '4/4').trim() || '4/4';
+            const takesCount = Math.max(1, Math.min(4, parseInt(opts.takesCount ?? STUDIO_CONFIG.takesCount ?? 4, 10) || 4));
+            const baseSeed = (opts.seed != null && Number(opts.seed) >= 0)
+              ? Math.floor(Number(opts.seed))
+              : Math.floor(100000000 + Math.random() * 800000000);
 
-            console.log(`  Calling Stable Audio API (duration: ${lengthSeconds}s, seed: ${customSeed})...`);
-
-            const postGeneration = async (includeNegativeWeight) => {
-              const promptsArr = [{ text: prompt, weight: 1 }];
-              if (includeNegativeWeight && negPrompt) {
-                promptsArr.push({ text: negPrompt, weight: -1 });
-              }
-              return fetch(
-                'https://api.stableaudio.com/v1alpha/generations/stable-audio-v2-5/text-to-music',
-                {
-                  method: 'POST',
-                  headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${currentToken}`
-                  },
-                  body: JSON.stringify({
-                    data: {
-                      type: 'generations',
-                      attributes: {
-                        prompts: promptsArr,
-                        length_seconds: lengthSeconds,
-                        seed: customSeed
-                      }
-                    }
-                  })
-                }
-              );
-            };
-
-            let res = await postGeneration(true);
-            if (res.status === 400 && negPrompt) {
-              const peekErr = await res.clone().text().catch(() => '');
-              if (/weight|negative|prompts/i.test(peekErr)) {
-                res = await postGeneration(false);
-              }
+            const finalPrompt = buildStableAudioPrompt(prompt, { ...opts, audioShape: shape, musicalKey });
+            const tracks = [];
+            for (let i = 0; i < takesCount; i++) {
+              const t = { generation_prompt: finalPrompt, seed: baseSeed + i };
+              if (shape === 'oneshot') t.is_oneshot = true;
+              tracks.push(t);
             }
 
+            const plan = {
+              source: 'generate',
+              tracks,
+              time_signature: timeSignature
+            };
+            if (musicalKey && musicalKey !== 'Auto') {
+              plan.key = musicalKey;
+            }
+
+            const payload = {
+              plan,
+              duration_per_stem: durSec,
+              output_format: 'wav',
+              quality_preset: 'standard',
+              apply_mix: false,
+              generation_strategy: 'parallel_t2a'
+            };
+
+            console.log(`  Calling Stable Audio Wizard API (${takesCount} tracks | ${durSec}s | shape: ${shape} | key: ${musicalKey} | meter: ${timeSignature} | baseSeed: ${baseSeed})...`);
+
+            const res = await fetchWithTimeout(
+              `${WIZARD_API_BASE}/compose-from-plan`,
+              {
+                method: 'POST',
+                headers: buildWizardHeaders({
+                  'Content-Type': 'application/json',
+                  'idempotency-key': crypto.randomUUID()
+                }),
+                body: JSON.stringify(payload)
+              },
+              60000
+            );
+
             if (!res.ok) {
-              const errText = await res.text();
+              const errText = await res.text().catch(() => '');
               const errLower = errText.toLowerCase();
               const isAuthError = (
                 res.status === 401 ||
@@ -4073,6 +4236,7 @@ jobs:
               );
               const isLimitError = (
                 res.status === 429 ||
+                res.status === 402 ||
                 (res.status === 400 && (
                   errLower.includes('limit') || errLower.includes('quota') ||
                   errLower.includes('credit') || errLower.includes('rate') ||
@@ -4081,34 +4245,86 @@ jobs:
               );
 
               if ((isAuthError || isLimitError) && !isRetry) {
-                console.warn(`  ${isAuthError ? 'Auth/Token error' : 'API limit hit'}! Auto-creating new Stable Audio account...`);
+                console.warn(`  ${isAuthError ? 'Auth/Token error' : 'API limit/credits hit'} (${res.status})! Auto-creating new Stable Audio account...`);
                 currentToken = await createStableAudioAccount();
-                return generateStableAudio(prompt, lengthSeconds, opts, true);
+                STUDIO_STATUS.stableAudioReady = true;
+                return generateStableAudio(prompt, durSec, opts, true);
               }
-              throw new Error(`Stable Audio API error (${res.status}): ${errText.slice(0, 260)}`);
+              throw new Error(`Stable Audio Wizard API error (${res.status}): ${errText.slice(0, 260)}`);
             }
 
             const data = await res.json();
-            return { resultUrl: data.data[0].links.result, seed: customSeed };
+            const jobId = data?.job_id;
+            if (!jobId) {
+              throw new Error(`Stable Audio Wizard returned no job_id: ${JSON.stringify(data).slice(0, 200)}`);
+            }
+            console.log(`  Wizard job created: ${jobId} (expecting ${takesCount} stems of ${durSec}s)`);
+            return { jobId, baseSeed, finalPrompt, takesCount, durSec, shape, musicalKey, timeSignature };
           }
 
-          async function pollStableAudioResult(resultUrl) {
-            const maxRetries = 60;
+          async function pollStableAudioResult(jobId) {
+            const maxRetries = 90;
             for (let i = 0; i < maxRetries; i++) {
-              const res = await fetch(resultUrl, {
-                headers: { 'Authorization': `Bearer ${currentToken}`, 'Accept': '*/*' }
-              });
-              if (res.status === 200) {
-                console.log(`  Audio generation complete!`);
-                return Buffer.from(await res.arrayBuffer());
+              const stRes = await fetchWithTimeout(
+                `${WIZARD_API_BASE}/status/${encodeURIComponent(jobId)}`,
+                { headers: buildWizardHeaders({ 'Content-Type': 'application/json' }) },
+                30000
+              );
+              if (!stRes.ok) {
+                const errText = await stRes.text().catch(() => '');
+                throw new Error(`Wizard status poll failed (${stRes.status}): ${errText.slice(0, 200)}`);
               }
-              if (res.status === 202) {
-                await sleep(3000);
-              } else {
-                throw new Error(`Poll failed: HTTP ${res.status}`);
+              const st = await stRes.json();
+              const status = String(st?.status || '').toLowerCase();
+              if (status === 'complete' || status === 'completed') {
+                console.log(`  Wizard job ${jobId} complete (${st.stems_completed || 0}/${st.stems_total || 0} stems in ${st.elapsed_seconds || '?'}s)!`);
+                break;
               }
+              if (status === 'failed' || status === 'error' || status === 'cancelled') {
+                throw new Error(`Wizard job failed: ${st.error || status}`);
+              }
+              if (i === maxRetries - 1) {
+                throw new Error('Timed out waiting for Stable Audio Wizard generation (3 minutes).');
+              }
+              await sleep(2000);
             }
-            throw new Error('Timed out waiting for audio generation (3 minutes).');
+
+            const resResult = await fetchWithTimeout(
+              `${WIZARD_API_BASE}/result/${encodeURIComponent(jobId)}?include_audio=false`,
+              { headers: buildWizardHeaders({ 'Content-Type': 'application/json' }) },
+              30000
+            );
+            if (!resResult.ok) {
+              const errText = await resResult.text().catch(() => '');
+              throw new Error(`Wizard result fetch failed (${resResult.status}): ${errText.slice(0, 200)}`);
+            }
+            const resultData = await resResult.json();
+            const stems = Array.isArray(resultData?.stems) ? resultData.stems : [];
+            if (!stems.length) {
+              throw new Error('Wizard result returned 0 stems.');
+            }
+            return stems;
+          }
+
+          async function downloadStableAudioStem(jobId, stem) {
+            const stemName = stem?.name || 'item-0';
+            if (stem?.audio_url && /^https?:\/\//i.test(stem.audio_url)) {
+              try {
+                const r = await fetchWithTimeout(stem.audio_url, { headers: { 'Accept': 'audio/*, */*' } }, 60000);
+                if (r.ok) {
+                  const buf = Buffer.from(await r.arrayBuffer());
+                  if (buf.length > 1000) return buf;
+                }
+              } catch {}
+            }
+            const stemUrl = `${WIZARD_API_BASE}/stems/${encodeURIComponent(jobId)}/${encodeURIComponent(stemName)}`;
+            const r2 = await fetchWithTimeout(stemUrl, { headers: buildWizardHeaders({ 'Accept': 'audio/*' }) }, 60000);
+            if (!r2.ok) {
+              throw new Error(`Stem download failed (${r2.status}) for ${stemName}`);
+            }
+            const buf = Buffer.from(await r2.arrayBuffer());
+            if (buf.length < 1000) throw new Error(`Downloaded stem ${stemName} is too small (${buf.length} bytes)`);
+            return buf;
           }
 
           // ─── FFMPEG AUDIO MASTERING (SILENCE TRIM + NORMALIZE + BOOST + FADES) ─────
@@ -4137,19 +4353,38 @@ jobs:
             };
           }
 
+          function convertAudioToMp3(inputBuffer, bitrate = '192k') {
+            if (!FFMPEG) return inputBuffer;
+            const tmpDir = '/tmp/ringtone_proc';
+            fs.mkdirSync(tmpDir, { recursive: true });
+            const stamp  = `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+            const tmpIn  = path.join(tmpDir, `raw_${stamp}.wav`);
+            const tmpOut = path.join(tmpDir, `raw_${stamp}.mp3`);
+            fs.writeFileSync(tmpIn, inputBuffer);
+            try {
+              ffRun(`-i "${tmpIn}" -ar 44100 -b:a ${bitrate} -y "${tmpOut}"`);
+              return fs.readFileSync(tmpOut);
+            } finally {
+              try { fs.unlinkSync(tmpIn); } catch {}
+              try { fs.unlinkSync(tmpOut); } catch {}
+            }
+          }
+
           async function autoProcessAudio(inputBuffer, opts = {}) {
             if (!FFMPEG) throw new Error('ffmpeg binary not available');
             const gainFactor       = (parseInt(opts.volumeBoostPct ?? STUDIO_CONFIG.volumeBoostPct ?? 200, 10)) / 100;
             const silenceThreshold = parseFloat(opts.silenceThreshold ?? STUDIO_CONFIG.silenceThreshold ?? 0.02);
             const padSec           = (parseInt(opts.padMs ?? STUDIO_CONFIG.padMs ?? 100, 10)) / 1000;
-            const fadeInSec        = (parseInt(opts.fadeInMs ?? STUDIO_CONFIG.fadeInMs ?? 0, 10)) / 1000;
-            const fadeOutSec       = (parseInt(opts.fadeOutMs ?? STUDIO_CONFIG.fadeOutMs ?? 0, 10)) / 1000;
+            const shape            = String(opts.audioShape || STUDIO_CONFIG.audioShape || 'track').toLowerCase();
+            const shouldTrim       = (opts.trimSilence ?? STUDIO_CONFIG.trimSilence ?? false) === true && shape !== 'loop';
+            const fadeInSec        = shape === 'loop' ? 0 : ((parseInt(opts.fadeInMs ?? STUDIO_CONFIG.fadeInMs ?? 0, 10)) / 1000);
+            const fadeOutSec       = shape === 'loop' ? 0 : ((parseInt(opts.fadeOutMs ?? STUDIO_CONFIG.fadeOutMs ?? 0, 10)) / 1000);
             const bitrate          = opts.bitrate || STUDIO_CONFIG.bitrate || '192k';
 
             const tmpDir = '/tmp/ringtone_proc';
             fs.mkdirSync(tmpDir, { recursive: true });
             const stamp  = `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-            const tmpIn  = path.join(tmpDir, `in_${stamp}.mp3`);
+            const tmpIn  = path.join(tmpDir, `in_${stamp}.wav`);
             const tmpOut = path.join(tmpDir, `out_${stamp}.mp3`);
             fs.writeFileSync(tmpIn, inputBuffer);
 
@@ -4162,15 +4397,20 @@ jobs:
               const normalizeDb = before.peakDb == null ? 0 : Math.min(30, Math.max(0, -1.0 - before.peakDb));
               const totalGainDb = normalizeDb + boostDb;
 
-              const chain = [
-                `silenceremove=start_periods=1:start_threshold=${dbStr}:start_silence=${padSec}:detection=peak`,
-                `areverse`,
-                `silenceremove=start_periods=1:start_threshold=${dbStr}:start_silence=${padSec}:detection=peak`
-              ];
-              if (fadeOutSec > 0.01) {
-                chain.push(`afade=t=in:st=0:d=${fadeOutSec.toFixed(3)}`);
+              const chain = [];
+              if (shouldTrim) {
+                chain.push(
+                  `silenceremove=start_periods=1:start_threshold=${dbStr}:start_silence=${padSec}:detection=peak`,
+                  `areverse`,
+                  `silenceremove=start_periods=1:start_threshold=${dbStr}:start_silence=${padSec}:detection=peak`
+                );
+                if (fadeOutSec > 0.01) {
+                  chain.push(`afade=t=in:st=0:d=${fadeOutSec.toFixed(3)}`);
+                }
+                chain.push(`areverse`);
+              } else if (fadeOutSec > 0.01) {
+                chain.push(`areverse`, `afade=t=in:st=0:d=${fadeOutSec.toFixed(3)}`, `areverse`);
               }
-              chain.push(`areverse`);
               if (fadeInSec > 0.01) {
                 chain.push(`afade=t=in:st=0:d=${fadeInSec.toFixed(3)}`);
               }
@@ -4345,10 +4585,14 @@ jobs:
             STUDIO_AUDIOS.sort((a, b) => (b.isNewSession ? 1 : 0) - (a.isNewSession ? 1 : 0) || (b.createdAt || 0) - (a.createdAt || 0));
           }
 
-          // ─── GENERATE ONE UNIQUE RINGTONE & PUSH TO FIREBASE ───────────────────────
+          // ─── GENERATE ALL TAKES (UP TO 4 TRACKS PER PROMPT) & PUSH TO FIREBASE ────
           async function generateAndPushOne(prompt, dbTarget, opts = {}) {
             const cfg = { ...STUDIO_CONFIG, ...opts };
-            const durSec = parseInt(cfg.lengthSeconds || INITIAL_LENGTH_SEC, 10) || 25;
+            const durSec = Math.max(1, Math.min(60, parseInt(cfg.lengthSeconds || INITIAL_LENGTH_SEC, 10) || 20));
+            const shape = String(cfg.audioShape || 'track').toLowerCase();
+            const musicalKey = String(cfg.musicalKey || 'Auto').trim();
+            const timeSignature = String(cfg.timeSignature || '4/4').trim();
+            const takesCount = Math.max(1, Math.min(4, parseInt(cfg.takesCount ?? 4, 10) || 4));
 
             if (prompt) {
               const pi = zedgePolicyIssues({ title: prompt });
@@ -4372,91 +4616,123 @@ jobs:
             }
             if (!meta) throw new Error('Could not generate policy-compliant metadata after 3 attempts');
 
-            console.log(`  [${dbTarget.name}] Title: "${meta.title}" | Category: ${meta.category}`);
-            STUDIO_STATUS.currentTask = `[${dbTarget.name}] Rendering "${meta.title}" (${durSec}s) via Stable Audio 2.5...`;
+            console.log(`  [${dbTarget.name}] Title: "${meta.title}" | Category: ${meta.category} | Shape: ${shape} | Key: ${musicalKey} | Duration: ${durSec}s | Takes: ${takesCount}`);
+            STUDIO_STATUS.currentTask = `[${dbTarget.name}] Rendering ${takesCount} tracks for "${meta.title}" (${durSec}s, ${shape}) via Stable Audio Wizard...`;
 
-            const { resultUrl, seed } = await generateStableAudio(meta.enhancedPrompt, durSec, cfg);
-            let audioBuffer = await pollStableAudioResult(resultUrl);
+            const jobInfo = await generateStableAudio(meta.enhancedPrompt, durSec, cfg);
+            const stems = await pollStableAudioResult(jobInfo.jobId);
+            const totalTakes = stems.length;
+            const createdItems = [];
 
-            let processed = false;
-            let processing = null;
-            let processError = null;
-            if (cfg.autoProcess !== false && FFMPEG) {
-              try {
-                STUDIO_STATUS.currentTask = `[${dbTarget.name}] Mastering "${meta.title}" with FFmpeg DSP...`;
-                const r = await autoProcessAudio(audioBuffer, cfg);
-                audioBuffer = r.buffer;
-                processing = r.stats;
-                processed = true;
-                audioStats.processed++;
-                if (r.stats.trimmedSec) audioStats.trimmedSec += r.stats.trimmedSec;
-              } catch (e) {
-                processError = e.message;
-                audioStats.failed++;
-                if (audioStats.reasons.length < 10) audioStats.reasons.push(`[${dbTarget.name}] ${e.message.slice(0, 160)}`);
-                console.error(`  [${dbTarget.name}] FFmpeg mastering failed, using raw audio: ${e.message}`);
+            for (let idx = 0; idx < totalTakes; idx++) {
+              if (STUDIO_STATUS.stopRequested) break;
+              const stem = stems[idx];
+              const takeNum = idx + 1;
+              const takeSeed = stem?.generation_settings?.seed ?? (jobInfo.baseSeed + idx);
+              const takeTitle = totalTakes > 1
+                ? `${meta.title.slice(0, 27).trim()} V${takeNum}`
+                : meta.title;
+
+              STUDIO_STATUS.currentTask = `[${dbTarget.name}] Downloading Take ${takeNum}/${totalTakes} ("${takeTitle}")...`;
+              let audioBuffer = await downloadStableAudioStem(jobInfo.jobId, stem);
+
+              let processed = false;
+              let processing = null;
+              let processError = null;
+              if (cfg.autoProcess !== false && FFMPEG) {
+                try {
+                  STUDIO_STATUS.currentTask = `[${dbTarget.name}] Mastering Take ${takeNum}/${totalTakes} ("${takeTitle}") with FFmpeg DSP...`;
+                  const r = await autoProcessAudio(audioBuffer, cfg);
+                  audioBuffer = r.buffer;
+                  processing = r.stats;
+                  processed = true;
+                  audioStats.processed++;
+                  if (r.stats.trimmedSec) audioStats.trimmedSec += r.stats.trimmedSec;
+                } catch (e) {
+                  processError = e.message;
+                  audioStats.failed++;
+                  if (audioStats.reasons.length < 10) audioStats.reasons.push(`[${dbTarget.name}] ${e.message.slice(0, 160)}`);
+                  console.error(`  [${dbTarget.name}] FFmpeg mastering failed on take ${takeNum}, converting WAV->MP3: ${e.message}`);
+                  audioBuffer = convertAudioToMp3(audioBuffer, cfg.bitrate || '192k');
+                }
+              } else if (FFMPEG) {
+                audioBuffer = convertAudioToMp3(audioBuffer, cfg.bitrate || '192k');
               }
+
+              STUDIO_STATUS.currentTask = `[${dbTarget.name}] Uploading Take ${takeNum}/${totalTakes} ("${takeTitle}") to R2 & Firebase...`;
+              const fileName = generateFilename(takeTitle, dbTarget.name);
+              const fileUrl = await uploadToR2(audioBuffer, fileName, dbTarget.name);
+
+              const createdAt = Date.now();
+              const key = await firebasePushToUrl(dbTarget.url, QUEUE_PATH, {
+                name: fileName,
+                type: 'audio/mpeg',
+                size: audioBuffer.length,
+                width: null,
+                height: null,
+                isMp3: true,
+                contentType: 'RINGTONE',
+                fileUrl,
+                title: takeTitle,
+                tags: meta.tags,
+                category: meta.category,
+                description: meta.description,
+                policyCheck: 'passed',
+                policyCheckedAt: createdAt,
+                status: 'queued',
+                prompt: prompt || meta.enhancedPrompt,
+                enhancedPrompt: jobInfo.finalPrompt,
+                negativePrompt: cfg.negativePrompt || '',
+                audioSeed: takeSeed,
+                audioModel: 'stable-audio-wizard',
+                audioShape: shape,
+                musicalKey,
+                timeSignature,
+                lengthSeconds: stem?.duration_seconds || durSec,
+                takeIndex: takeNum,
+                takesTotal: totalTakes,
+                wizardJobId: jobInfo.jobId,
+                autoProcess: cfg.autoProcess !== false,
+                processed,
+                processing,
+                processError,
+                createdAt
+              });
+
+              const itemId = `${dbTarget.name}_${key}`;
+              const localPath = path.join(AUDIO_CACHE_DIR, `${itemId}.mp3`);
+              try { fs.writeFileSync(localPath, audioBuffer); } catch {}
+
+              const studioItem = {
+                id: itemId,
+                dbName: dbTarget.name,
+                firebaseKey: key,
+                keys: [{ dbName: dbTarget.name, key }],
+                title: takeTitle,
+                tags: meta.tags,
+                category: meta.category,
+                description: meta.description,
+                prompt: prompt || meta.enhancedPrompt,
+                enhancedPrompt: jobInfo.finalPrompt,
+                fileUrl,
+                lengthSeconds: stem?.duration_seconds || durSec,
+                audioSeed: takeSeed,
+                audioShape: shape,
+                musicalKey,
+                timeSignature,
+                takeIndex: takeNum,
+                takesTotal: totalTakes,
+                processed,
+                processing,
+                isNewSession: true,
+                createdAt
+              };
+              STUDIO_AUDIOS.unshift(studioItem);
+              createdItems.push(studioItem);
+              STUDIO_STATUS.completed = (STUDIO_STATUS.completed || 0) + 1;
+              console.log(`  [${dbTarget.name}] Queued Take ${takeNum}/${totalTakes} "${takeTitle}" (${processing?.durationAfter || durSec}s) -> Firebase key: ${key}`);
             }
-
-            STUDIO_STATUS.currentTask = `[${dbTarget.name}] Uploading "${meta.title}" to R2 & Firebase...`;
-            const fileName = generateFilename(meta.title, dbTarget.name);
-            const fileUrl = await uploadToR2(audioBuffer, fileName, dbTarget.name);
-
-            const createdAt = Date.now();
-            const key = await firebasePushToUrl(dbTarget.url, QUEUE_PATH, {
-              name: fileName,
-              type: 'audio/mpeg',
-              size: audioBuffer.length,
-              width: null,
-              height: null,
-              isMp3: true,
-              contentType: 'RINGTONE',
-              fileUrl,
-              title: meta.title,
-              tags: meta.tags,
-              category: meta.category,
-              description: meta.description,
-              policyCheck: 'passed',
-              policyCheckedAt: createdAt,
-              status: 'queued',
-              prompt: prompt || meta.enhancedPrompt,
-              enhancedPrompt: meta.enhancedPrompt,
-              negativePrompt: cfg.negativePrompt || '',
-              audioSeed: seed,
-              audioModel: 'stable-audio-v2-5',
-              autoProcess: cfg.autoProcess !== false,
-              processed,
-              processing,
-              processError,
-              createdAt
-            });
-
-            const itemId = `${dbTarget.name}_${key}`;
-            const localPath = path.join(AUDIO_CACHE_DIR, `${itemId}.mp3`);
-            try { fs.writeFileSync(localPath, audioBuffer); } catch {}
-
-            const studioItem = {
-              id: itemId,
-              dbName: dbTarget.name,
-              firebaseKey: key,
-              keys: [{ dbName: dbTarget.name, key }],
-              title: meta.title,
-              tags: meta.tags,
-              category: meta.category,
-              description: meta.description,
-              prompt: prompt || meta.enhancedPrompt,
-              enhancedPrompt: meta.enhancedPrompt,
-              fileUrl,
-              lengthSeconds: durSec,
-              audioSeed: seed,
-              processed,
-              processing,
-              isNewSession: true,
-              createdAt
-            };
-            STUDIO_AUDIOS.unshift(studioItem);
-            console.log(`  [${dbTarget.name}] Queued "${meta.title}" -> Firebase key: ${key}`);
-            return studioItem;
+            return createdItems;
           }
 
           async function runGenerationBatch(promptsList, opts = {}) {
@@ -4465,11 +4741,12 @@ jobs:
             }
             const cfg = { ...STUDIO_CONFIG, ...opts };
             const targetDbs = resolveTargetDbs(cfg.targetAccount);
+            const takesCount = Math.max(1, Math.min(4, parseInt(cfg.takesCount ?? 4, 10) || 4));
 
             STUDIO_STATUS.isGenerating = true;
             STUDIO_STATUS.stopRequested = false;
             STUDIO_STATUS.completed = 0;
-            STUDIO_STATUS.total = promptsList.length;
+            STUDIO_STATUS.total = promptsList.length * takesCount * targetDbs.length;
 
             const batchResults = [];
             try {
@@ -4485,27 +4762,27 @@ jobs:
                   break;
                 }
                 const prompt = promptsList[i];
-                console.log(`\n[${i + 1}/${promptsList.length}] Processing: ${prompt ? `"${prompt}"` : 'Smart Auto-Concept'}`);
+                console.log(`\n[${i + 1}/${promptsList.length}] Processing (${takesCount} tracks): ${prompt ? `"${prompt}"` : 'Smart Auto-Concept'}`);
 
                 try {
                   const pushResults = [];
                   for (const dbTarget of targetDbs) {
                     if (STUDIO_STATUS.stopRequested) break;
-                    const item = await generateAndPushOne(prompt, dbTarget, cfg);
-                    pushResults.push(item);
+                    const items = await generateAndPushOne(prompt, dbTarget, cfg);
+                    pushResults.push(...items);
                   }
                   batchResults.push({
                     status: 'success',
                     prompt: prompt || 'Auto-Generated',
                     title: pushResults[0]?.title,
                     category: pushResults[0]?.category,
+                    tracksCreated: pushResults.length,
                     keys: pushResults.map(r => ({ dbName: r.dbName, key: r.firebaseKey }))
                   });
                 } catch (err) {
                   console.error(`Prompt ${i + 1} failed: ${err.message}`);
                   batchResults.push({ status: 'failed', prompt: prompt || 'Auto-Generated', error: err.message });
                 }
-                STUDIO_STATUS.completed = i + 1;
               }
             } finally {
               STUDIO_STATUS.isGenerating = false;
@@ -4660,7 +4937,10 @@ jobs:
                   negativePrompt: body.negativePrompt ?? STUDIO_CONFIG.negativePrompt,
                   bannedWords: body.bannedWords ?? STUDIO_CONFIG.bannedWords,
                   soundType: body.soundType || STUDIO_CONFIG.soundType,
-                  lengthSeconds: parseInt(body.lengthSeconds || STUDIO_CONFIG.lengthSeconds, 10),
+                  audioShape: ['track', 'loop', 'oneshot'].includes(String(body.audioShape || '').toLowerCase()) ? String(body.audioShape).toLowerCase() : STUDIO_CONFIG.audioShape,
+                  takesCount: Math.max(1, Math.min(4, parseInt(body.takesCount ?? STUDIO_CONFIG.takesCount ?? 4, 10) || 4)),
+                  timeSignature: body.timeSignature || STUDIO_CONFIG.timeSignature || '4/4',
+                  lengthSeconds: Math.max(1, Math.min(60, parseInt(body.lengthSeconds || STUDIO_CONFIG.lengthSeconds, 10) || 20)),
                   targetAccount: body.targetAccount || STUDIO_CONFIG.targetAccount,
                   useGeminiEnhancer: body.useGeminiEnhancer !== false,
                   bpm: body.bpm ?? STUDIO_CONFIG.bpm,
@@ -4671,6 +4951,7 @@ jobs:
                   structure: body.structure ?? STUDIO_CONFIG.structure,
                   production: body.production ?? STUDIO_CONFIG.production,
                   autoProcess: body.autoProcess !== false,
+                  trimSilence: body.trimSilence === true,
                   volumeBoostPct: parseInt(body.volumeBoostPct || STUDIO_CONFIG.volumeBoostPct, 10),
                   silenceThreshold: parseFloat(body.silenceThreshold || STUDIO_CONFIG.silenceThreshold),
                   padMs: parseInt(body.padMs ?? STUDIO_CONFIG.padMs, 10),
@@ -4692,7 +4973,10 @@ jobs:
                   negativePrompt: body.negativePrompt ?? STUDIO_CONFIG.negativePrompt,
                   bannedWords: body.bannedWords ?? STUDIO_CONFIG.bannedWords,
                   soundType: body.soundType || STUDIO_CONFIG.soundType,
-                  lengthSeconds: parseInt(body.lengthSeconds || STUDIO_CONFIG.lengthSeconds, 10),
+                  audioShape: ['track', 'loop', 'oneshot'].includes(String(body.audioShape || '').toLowerCase()) ? String(body.audioShape).toLowerCase() : STUDIO_CONFIG.audioShape,
+                  takesCount: Math.max(1, Math.min(4, parseInt(body.takesCount ?? STUDIO_CONFIG.takesCount ?? 4, 10) || 4)),
+                  timeSignature: body.timeSignature || STUDIO_CONFIG.timeSignature || '4/4',
+                  lengthSeconds: Math.max(1, Math.min(60, parseInt(body.lengthSeconds || STUDIO_CONFIG.lengthSeconds, 10) || 20)),
                   targetAccount: body.targetAccount || STUDIO_CONFIG.targetAccount,
                   useGeminiEnhancer: body.useGeminiEnhancer !== false,
                   bpm: body.bpm ?? STUDIO_CONFIG.bpm,
@@ -4703,6 +4987,7 @@ jobs:
                   structure: body.structure ?? STUDIO_CONFIG.structure,
                   production: body.production ?? STUDIO_CONFIG.production,
                   autoProcess: body.autoProcess !== false,
+                  trimSilence: body.trimSilence === true,
                   volumeBoostPct: parseInt(body.volumeBoostPct || STUDIO_CONFIG.volumeBoostPct, 10),
                   silenceThreshold: parseFloat(body.silenceThreshold || STUDIO_CONFIG.silenceThreshold),
                   padMs: parseInt(body.padMs ?? STUDIO_CONFIG.padMs, 10),
@@ -4722,7 +5007,7 @@ jobs:
                   console.error(`Batch error: ${err.message}`);
                 });
 
-                return sendJson(res, 200, { ok: true, total: promptsList.length });
+                return sendJson(res, 200, { ok: true, total: promptsList.length * (STUDIO_CONFIG.takesCount || 4) });
               }
 
               if (req.method === 'POST' && u.pathname === '/api/stop-batch') {
