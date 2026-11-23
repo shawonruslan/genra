@@ -2760,7 +2760,21 @@ jobs:
           const GEMINI_SESSION_RAW   = (process.env.GEMINI_SESSION_INPUT?.trim() || process.env.GEMINI_SESSION || '').trim();
           const INITIAL_TARGET_ACC   = (process.env.TARGET_ACCOUNT || 'zedge_2').trim().toLowerCase();
           const QUEUE_PATH           = 'wallpaperQueue';
-          const R2_WORKER_URL        = (process.env.R2_WORKER_URL || 'https://frosty-pine-2f7dzedge-r2-gateway.holaexplainer.workers.dev').trim();
+          const R2_WORKER_URL        = (process.env.R2_WORKER_URL || '').trim();
+          const FIREBASE_DB_MAP      = Object.fromEntries(
+            Object.entries({
+              zedge_1: process.env.ZEDGE1_DB_URL,
+              zedge_2: process.env.ZEDGE2_DB_URL,
+              zedge_3: process.env.ZEDGE3_DB_URL,
+              zedge_4: process.env.ZEDGE4_DB_URL
+            })
+              .map(([k, v]) => [k, String(v || '').trim().replace(/\/+$/, '')])
+              .filter(([, v]) => Boolean(v))
+          );
+          if (!Object.keys(FIREBASE_DB_MAP).length) {
+            console.error('❌ No ZEDGEn_DB_URL GitHub secret is set — add ZEDGE1_DB_URL..ZEDGE4_DB_URL in Repo Secrets.');
+            process.exit(1);
+          }
           const AUTO_GENERATE_COUNT  = parseInt(process.env.AUTO_GENERATE_COUNT || '10', 10);
           const INITIAL_LENGTH_SEC   = parseInt(process.env.LENGTH_SECONDS || '20', 10);
           const INITIAL_AUTO_PROCESS = process.env.AUTO_PROCESS !== 'false';
