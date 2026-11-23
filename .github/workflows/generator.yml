@@ -14,7 +14,7 @@ on:
           - metadata
 
       gemini_session:
-        description: "🌐 Gemini Cookies / Session JSON (paste Cookie-Editor or storageState JSON)"
+        description: "🌐 Gemini Cookies / Session JSON (OPTIONAL — leave empty to use Live Browser Gmail Login in both modes)"
         required: false
         default: ""
 
@@ -5985,10 +5985,15 @@ jobs:
         with:
           node-version: 20
 
-      - name: 📥 Install Dependencies
+      - name: 📥 Install Dependencies & Live Browser Tools (for optional cookie-free login)
         run: |
           npm init -y
-          npm install node-fetch@3
+          npm install node-fetch@3 patchright
+          npx patchright install chrome --with-deps || npx playwright install chromium --with-deps || true
+          curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /usr/local/bin/cloudflared
+          chmod +x /usr/local/bin/cloudflared
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends xvfb x11vnc openbox novnc websockify
 
       - name: 🎬 Install ffmpeg (video frame extraction)
         run: |
@@ -6065,11 +6070,7 @@ jobs:
             return '';
           }
 
-          // ─── PARSE GEMINI SESSION ──────────────────────────────────────────────────
-          if (!GEMINI_SESSION_RAW) {
-            console.error('❌ Error: GEMINI_SESSION secret or input is missing.');
-            process.exit(1);
-          }
+          // ─── PARSE GEMINI SESSION (OPTIONAL — falls back to Live Browser Login) ─────
 
           // ─── COOKIE NORMALIZER ────────────────────────────────────────────────────
           // Converts browser-extension cookie objects (EditThisCookie, Cookie-Editor, etc.)
@@ -6115,7 +6116,8 @@ jobs:
           //   2. Raw cookie array:         [{ name, value, domain, ... }, ...]
           //   3. Wrapped/nested formats:   { cookies: [...], ... } with extra keys
           // We normalize all of them into a valid cookie list.
-          let GEMINI_STORAGE_STATE = null;
+          let GEMINI_STORAGE_STATE = { cookies: [] };
+          if (GEMINI_SESSION_RAW) {
           try {
             const parsed = JSON.parse(GEMINI_SESSION_RAW);
             console.log(`📋 Parsed session JSON top-level type: ${Array.isArray(parsed) ? 'array' : typeof parsed}`);
@@ -6180,8 +6182,9 @@ jobs:
             }
 
           } catch (e) {
-            console.error('❌ Error: GEMINI_SESSION is not valid JSON:', e.message);
-            process.exit(1);
+            console.warn('⚠️  GEMINI_SESSION JSON invalid (will use Live Browser Login instead):', e.message);
+            GEMINI_STORAGE_STATE = { cookies: [] };
+          }
           }
 
           // ─── BUILD COOKIE HEADER (extension-style direct web requests) ────────────
@@ -6208,8 +6211,8 @@ jobs:
             }
             return [...byName.entries()].map(([k, v]) => `${k}=${v}`).join('; ');
           }
-          const COOKIE_HEADER = buildCookieHeader(GEMINI_STORAGE_STATE);
-          console.log(`🍪 Cookie header built: ${COOKIE_HEADER.split('; ').length} cookies for google.com (${COOKIE_HEADER.length} bytes)`);
+          let COOKIE_HEADER = GEMINI_STORAGE_STATE.cookies.length ? buildCookieHeader(GEMINI_STORAGE_STATE) : '';
+          if (COOKIE_HEADER) console.log(`🍪 Cookie header built: ${COOKIE_HEADER.split('; ').length} cookies for google.com (${COOKIE_HEADER.length} bytes)`);
 
           // Minimal auth-only cookie header — fallback when Google answers with
           // "431 Request Header Fields Too Large" on an oversized cookie jar.
@@ -6228,8 +6231,8 @@ jobs:
             }
             return [...byName.entries()].map(([k, v]) => `${k}=${v}`).join('; ');
           }
-          const COOKIE_HEADER_MIN = buildMinimalCookieHeader(GEMINI_STORAGE_STATE);
-          console.log(`🍪 Minimal fallback cookie header: ${COOKIE_HEADER_MIN.split('; ').length} cookies (${COOKIE_HEADER_MIN.length} bytes)`);
+          let COOKIE_HEADER_MIN = GEMINI_STORAGE_STATE.cookies.length ? buildMinimalCookieHeader(GEMINI_STORAGE_STATE) : '';
+          if (COOKIE_HEADER_MIN) console.log(`🍪 Minimal fallback cookie header: ${COOKIE_HEADER_MIN.split('; ').length} cookies (${COOKIE_HEADER_MIN.length} bytes)`);
 
           // ─── FIREBASE DB ROUTING ──────────────────────────────────────────────────
           // <-- CONFIG: your Firebase Realtime Database URLs (same as in index.html / Core.kt / zedgeN.yml)
@@ -7014,16 +7017,94 @@ jobs:
           console.log('🌐 Gemini Mode           : Web RPC (StreamGenerate — extension-style, no browser)');
           console.log('============================================================\n');
 
-          // ─── VERIFY GEMINI RPC SESSION (replaces the old browser launch) ──────────
-          console.log('🔐 Verifying Gemini RPC session (fetching SNlM0e token from /app HTML)...');
-          try {
-            await getGeminiSession(false);
-            console.log('✅ Session verified — Gemini RPC ready.\n');
-          } catch (err) {
-            console.error(`❌ Session FAILED: ${err.message}`);
-            console.error('   The GEMINI_SESSION cookies are expired or invalid.');
-            console.error('   Please re-export a fresh session using the Rigatone extension.');
-            process.exit(1);
+          // ─── VERIFY GEMINI RPC SESSION (OPTIONAL COOKIES -> LIVE BROWSER FALLBACK) ─
+          let metaBrowserCtx = null;
+          let metaVncTunnelProc = null;
+          async function launchMetadataLiveBrowserLogin() {
+            console.log('🌐 Starting Live Gemini Browser Login (no cookies required)...');
+            const { spawn } = await import('child_process');
+            try {
+              execSync('pkill -f "Xvfb :99" || true; pkill -f "x11vnc" || true; pkill -f "websockify" || true', { stdio: 'ignore' });
+            } catch {}
+            spawn('Xvfb', [':99', '-screen', '0', '1280x800x24'], { detached: true, stdio: 'ignore' }).unref();
+            await sleep(800);
+            spawn('openbox', [], { env: { ...process.env, DISPLAY: ':99' }, detached: true, stdio: 'ignore' }).unref();
+            spawn('x11vnc', ['-display', ':99', '-forever', '-shared', '-nopw', '-rfbport', '5900'], { detached: true, stdio: 'ignore' }).unref();
+            spawn('websockify', ['--web=/usr/share/novnc/', '6080', 'localhost:5900'], { detached: true, stdio: 'ignore' }).unref();
+            await sleep(1000);
+
+            const vncUrl = await new Promise((resolve) => {
+              let resolved = false;
+              metaVncTunnelProc = spawn('cloudflared', ['tunnel', '--no-autoupdate', '--url', 'http://127.0.0.1:6080'], { stdio: ['ignore', 'pipe', 'pipe'] });
+              const onOut = (chunk) => {
+                const m = String(chunk).match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/i);
+                if (m && !resolved) { resolved = true; resolve(m[0] + '/vnc.html?autoconnect=1&resize=scale'); }
+              };
+              metaVncTunnelProc.stdout.on('data', onOut);
+              metaVncTunnelProc.stderr.on('data', onOut);
+              setTimeout(() => { if (!resolved) { resolved = true; resolve(''); } }, 20000);
+            });
+
+            const { chromium } = await import('patchright');
+            const profileDir = '/tmp/gemini_meta_profile';
+            fs.mkdirSync(profileDir, { recursive: true });
+            metaBrowserCtx = await chromium.launchPersistentContext(profileDir, {
+              channel: 'chrome',
+              headless: false,
+              env: { ...process.env, DISPLAY: ':99' },
+              viewport: { width: 1260, height: 760 },
+              args: ['--no-sandbox', '--disable-dev-shm-usage']
+            });
+            const page = metaBrowserCtx.pages()[0] || await metaBrowserCtx.newPage();
+            await page.goto('https://gemini.google.com/app', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
+
+            console.log('\n============================================================');
+            console.log(`  🔐 OPEN THIS LINK TO LOG INTO GMAIL FOR GEMINI:`);
+            console.log(`  ${vncUrl || 'http://127.0.0.1:6080/vnc.html?autoconnect=1'}`);
+            console.log('  Waiting up to 15 minutes for you to sign in...');
+            console.log('============================================================\n');
+
+            const deadline = Date.now() + 15 * 60 * 1000;
+            while (Date.now() < deadline) {
+              try {
+                const wiz = await page.evaluate(() => {
+                  const w = window.WIZ_global_data || {};
+                  return { at: w.SNlM0e || '', bl: w.cfb2h || '', fSid: w.FdrFJe || '', authUser: Number(w.eptZe ?? 0) || 0 };
+                });
+                if (wiz && wiz.at) {
+                  const liveCookies = await metaBrowserCtx.cookies('https://gemini.google.com').catch(() => []);
+                  if (liveCookies.length) {
+                    COOKIE_HEADER = buildCookieHeader({ cookies: liveCookies });
+                    COOKIE_HEADER_MIN = buildMinimalCookieHeader({ cookies: liveCookies });
+                  }
+                  cachedGeminiSession = {
+                    authUser: wiz.authUser,
+                    at: wiz.at,
+                    bl: wiz.bl || 'boq_gemini-web-uiserver_20261122.16_p0',
+                    fSid: wiz.fSid || '',
+                    fetchedAt: Date.now()
+                  };
+                  console.log(`✅ Live Gemini Browser signed in! (u/${wiz.authUser}, bl=${cachedGeminiSession.bl})\n`);
+                  return;
+                }
+              } catch {}
+              await sleep(3000);
+            }
+            throw new Error('Timed out waiting for Live Gemini Browser Gmail login (15m)');
+          }
+
+          if (COOKIE_HEADER) {
+            console.log('🔐 Verifying optional Gemini cookie session (fetching SNlM0e token)...');
+            try {
+              await getGeminiSession(false);
+              console.log('✅ Cookie session verified — Gemini RPC ready.\n');
+            } catch (err) {
+              console.warn(`⚠️  Optional cookie session failed (${err.message}) — launching Live Gemini Browser Login...`);
+              await launchMetadataLiveBrowserLogin();
+            }
+          } else {
+            console.log('ℹ️  No Gemini cookies provided — using Live Gemini Browser Login.');
+            await launchMetadataLiveBrowserLogin();
           }
 
           // ─── PROCESS EACH DB TARGET ───────────────────────────────────────────────
@@ -7125,6 +7206,9 @@ jobs:
           console.log(`🛑 Held     : ${totalHeld} (Zedge policy — see Failed section, Requeue only if compliant)`);
           console.log(`⏭️  Already done: images with full metadata were skipped automatically`);
           console.log('============================================================');
+
+          if (metaBrowserCtx) { try { await metaBrowserCtx.close(); } catch {} }
+          if (metaVncTunnelProc) { try { metaVncTunnelProc.kill(); } catch {} }
 
           if (totalFailed > 0 && totalSuccess === 0) {
             process.exit(1);
