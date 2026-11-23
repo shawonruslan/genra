@@ -324,13 +324,16 @@ jobs:
 
               /* TOPBAR */
               .topbar {
-                height: 56px;
+                min-height: 56px;
+                height: auto;
                 background: var(--bg-panel);
                 border-bottom: 1px solid var(--border);
                 display: flex;
                 align-items: center;
                 justify-content: space-between;
-                padding: 0 20px;
+                flex-wrap: wrap;
+                gap: 8px 14px;
+                padding: 8px 18px;
                 position: sticky;
                 top: 0;
                 z-index: 100;
@@ -339,12 +342,14 @@ jobs:
               .brand {
                 display: flex;
                 align-items: center;
-                gap: 12px;
+                gap: 10px;
+                flex-shrink: 0;
+                white-space: nowrap;
               }
 
               .brand-logo {
-                width: 34px;
-                height: 34px;
+                width: 32px;
+                height: 32px;
                 border-radius: 8px;
                 background: var(--accent-soft);
                 border: 1px solid var(--accent-border);
@@ -352,16 +357,18 @@ jobs:
                 align-items: center;
                 justify-content: center;
                 color: var(--accent);
+                flex-shrink: 0;
               }
 
               .brand-title {
-                font-size: 15px;
+                font-size: 14px;
                 font-weight: 700;
                 letter-spacing: 0.3px;
                 color: var(--text-main);
                 display: flex;
                 align-items: center;
                 gap: 8px;
+                white-space: nowrap;
               }
 
               .badge-pro {
@@ -373,26 +380,34 @@ jobs:
                 background: var(--accent-soft);
                 color: var(--accent);
                 border: 1px solid var(--accent-border);
-                letter-spacing: 0.5px;
+                letter-spacing: 0.4px;
+                white-space: nowrap;
               }
 
               .topbar-status {
                 display: flex;
                 align-items: center;
-                gap: 10px;
+                gap: 6px;
                 flex-wrap: wrap;
+              }
+
+              .topbar-status .btn {
+                padding: 5px 9px;
+                font-size: 11.5px;
+                white-space: nowrap;
               }
 
               .status-pill {
                 display: inline-flex;
                 align-items: center;
-                gap: 7px;
-                padding: 5px 10px;
+                gap: 6px;
+                padding: 4px 9px;
                 background: var(--bg-card);
                 border: 1px solid var(--border);
                 border-radius: var(--radius-sm);
-                font-size: 12px;
+                font-size: 11.5px;
                 color: var(--text-secondary);
+                white-space: nowrap;
               }
 
               .dot {
@@ -1218,7 +1233,7 @@ jobs:
                 </div>
                 <div class="brand-title">
                   RINGTONE STUDIO PRO
-                  <span class="badge-pro">GEMINI WEB RPC + STABLE AUDIO 2.5</span>
+                  <span class="badge-pro">WIZARD 2.5</span>
                 </div>
               </div>
 
@@ -1974,7 +1989,7 @@ jobs:
                   ? [
                       'Crisp crystal kalimba and celesta 3-note notification chime with warm natural decay',
                       'Gentle Japanese koto plucked harmonic alert motif in pentatonic scale',
-                      'Warm vibraphone and soft wooden marimba double-tap message tone',
+                      'Warm vibraphone and soft wooden xylophone double-tap message tone',
                       'Bright acoustic harmonic guitar chime with airy stereo tail',
                       'Subtle Tibetan singing bowl and soft harp harmonic ping'
                     ]
@@ -2946,6 +2961,79 @@ jobs:
           let geminiBrowserPage = null;
           let geminiBrowserReady = false;
 
+          async function extractGeminiSessionFromLiveBrowser(forceReload = false) {
+            if (!geminiBrowserContext) return null;
+            try {
+              const pages = geminiBrowserContext.pages().filter(p => !p.isClosed());
+              const gemPage = pages.find(p => /gemini\.google\.com/i.test(p.url() || '') && !/accounts\.google\.com|ServiceLogin/i.test(p.url() || '')) || pages[0] || null;
+              if (gemPage) geminiBrowserPage = gemPage;
+
+              // Always harvest live cookies directly from browser context (bypasses Patchright isolated world)
+              const liveCookies = await geminiBrowserContext.cookies([
+                'https://gemini.google.com',
+                'https://google.com',
+                'https://accounts.google.com'
+              ]).catch(() => []);
+              const hasAuthCookie = liveCookies.some(c =>
+                c && (c.name === '__Secure-1PSID' || c.name === '__Secure-3PSID' || c.name === 'SAPISID') && c.value
+              );
+              if (liveCookies.length && hasAuthCookie) {
+                COOKIE_HEADER = buildCookieHeader({ cookies: liveCookies });
+                COOKIE_HEADER_MIN = buildMinimalCookieHeader({ cookies: liveCookies });
+              }
+
+              let sess = null;
+              if (geminiBrowserPage && !geminiBrowserPage.isClosed()) {
+                const url = geminiBrowserPage.url() || '';
+                if (/gemini\.google\.com/i.test(url) && !/accounts\.google\.com|ServiceLogin/i.test(url)) {
+                  if (forceReload) {
+                    await geminiBrowserPage.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+                    await sleep(1500);
+                  }
+                  // Read page HTML directly (Patchright evaluate runs in isolated world where window.WIZ_global_data is empty!)
+                  const html = await geminiBrowserPage.content().catch(() => '');
+                  const at = (html.match(/"SNlM0e"\s*:\s*"([^"]+)"/) || [])[1] || '';
+                  const bl = (html.match(/"cfb2h"\s*:\s*"([^"]+)"/) || [])[1] || 'boq_gemini-web-uiserver_20261122.16_p0';
+                  const fSid = (html.match(/"FdrFJe"\s*:\s*"(-?\d+)"/) || [])[1] || '';
+                  const uMatch = url.match(/\/u\/(\d+)/);
+                  const authUser = uMatch ? parseInt(uMatch[1], 10) : 0;
+                  if (at) {
+                    sess = { authUser, at, bl, fSid, fetchedAt: Date.now(), fromBrowser: true };
+                  }
+                }
+              }
+
+              // Fallback: if user signed in (auth cookies present) but SPA DOM didn't expose SNlM0e, fetch /app with live browser cookies
+              if (!sess && hasAuthCookie && COOKIE_HEADER) {
+                try {
+                  sess = await fetchGeminiSession(0, COOKIE_HEADER);
+                  sess.fromBrowser = !!(geminiBrowserPage && !geminiBrowserPage.isClosed() && /gemini\.google\.com/i.test(geminiBrowserPage.url() || ''));
+                } catch {
+                  try {
+                    sess = await fetchGeminiSession(0, COOKIE_HEADER_MIN);
+                    sess.fromBrowser = !!(geminiBrowserPage && !geminiBrowserPage.isClosed() && /gemini\.google\.com/i.test(geminiBrowserPage.url() || ''));
+                  } catch {}
+                }
+              }
+
+              if (sess && sess.at) {
+                cachedGeminiSession = sess;
+                if (!geminiBrowserReady) {
+                  geminiBrowserReady = true;
+                  STUDIO_STATUS.geminiReady = true;
+                  STUDIO_STATUS.geminiMode = 'browser';
+                  STUDIO_STATUS.geminiUser = sess.authUser;
+                  console.log(`  ✅ Live Gemini Browser signed in & ready! (u/${sess.authUser}, bl=${sess.bl})`);
+                } else {
+                  STUDIO_STATUS.geminiReady = true;
+                  STUDIO_STATUS.geminiUser = sess.authUser;
+                }
+                return sess;
+              }
+            } catch {}
+            return null;
+          }
+
           async function startGeminiLiveBrowser() {
             if (geminiBrowserContext) return;
             const profileDir = '/tmp/gemini_live_browser_profile';
@@ -2955,13 +3043,15 @@ jobs:
               const launchOpts = {
                 headless: false,
                 channel: 'chrome',
-                viewport: { width: 1320, height: 780 },
+                viewport: null,
                 args: [
                   '--no-sandbox',
-                  '--disable-setuid-sandbox',
                   '--disable-dev-shm-usage',
                   '--window-position=0,0',
-                  '--window-size=1320,780',
+                  '--window-size=1366,820',
+                  '--start-maximized',
+                  '--no-first-run',
+                  '--no-default-browser-check',
                   '--disable-blink-features=AutomationControlled'
                 ]
               };
@@ -2983,48 +3073,8 @@ jobs:
                 console.log(`  🔐 Open this link to sign in to Gmail/Gemini: ${GEMINI_VNC_URL}`);
               }
 
-              const checkBrowserLogin = async () => {
-                if (!geminiBrowserPage || geminiBrowserPage.isClosed()) return;
-                try {
-                  const url = geminiBrowserPage.url() || '';
-                  if (/gemini\.google\.com/i.test(url) && !/accounts\.google\.com|ServiceLogin/i.test(url)) {
-                    const wiz = await geminiBrowserPage.evaluate(() => {
-                      const g = window.WIZ_global_data || {};
-                      return {
-                        at: g.SNlM0e || '',
-                        bl: g.cfb2h || '',
-                        fSid: g.FdrFJe || '',
-                        authUser: Number(g.authuser || 0) || 0
-                      };
-                    }).catch(() => null);
-                    if (wiz && wiz.at) {
-                      cachedGeminiSession = {
-                        authUser: wiz.authUser,
-                        at: wiz.at,
-                        bl: wiz.bl || 'boq_gemini-web-uiserver_20261122.16_p0',
-                        fSid: wiz.fSid || '',
-                        fetchedAt: Date.now(),
-                        fromBrowser: true
-                      };
-                      const liveCookies = await geminiBrowserContext.cookies('https://gemini.google.com').catch(() => []);
-                      if (liveCookies.length) {
-                        COOKIE_HEADER = buildCookieHeader({ cookies: liveCookies });
-                        COOKIE_HEADER_MIN = buildMinimalCookieHeader({ cookies: liveCookies });
-                      }
-                      if (!geminiBrowserReady) {
-                        geminiBrowserReady = true;
-                        STUDIO_STATUS.geminiReady = true;
-                        STUDIO_STATUS.geminiMode = 'browser';
-                        STUDIO_STATUS.geminiUser = wiz.authUser;
-                        console.log(`  ✅ Live Gemini Browser signed in & ready! (u/${wiz.authUser}, bl=${cachedGeminiSession.bl})`);
-                      }
-                    }
-                  }
-                } catch {}
-              };
-
-              await checkBrowserLogin();
-              setInterval(checkBrowserLogin, 4000);
+              await extractGeminiSessionFromLiveBrowser(false);
+              setInterval(() => { extractGeminiSessionFromLiveBrowser(false).catch(() => {}); }, 3500);
             } catch (e) {
               console.warn(`  ⚠️ Could not start Live Gemini Browser: ${e.message}`);
             }
@@ -3079,29 +3129,12 @@ jobs:
           }
 
           async function getGeminiSession(forceRefresh = false) {
-            if (geminiBrowserPage && !geminiBrowserPage.isClosed()) {
-              if (forceRefresh) {
-                await geminiBrowserPage.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
-                await sleep(2000);
-              }
-              const wiz = await geminiBrowserPage.evaluate(() => {
-                const g = window.WIZ_global_data || {};
-                return { at: g.SNlM0e || '', bl: g.cfb2h || '', fSid: g.FdrFJe || '', authUser: Number(g.authuser || 0) || 0 };
-              }).catch(() => null);
-              if (wiz && wiz.at) {
-                cachedGeminiSession = {
-                  authUser: wiz.authUser,
-                  at: wiz.at,
-                  bl: wiz.bl || 'boq_gemini-web-uiserver_20261122.16_p0',
-                  fSid: wiz.fSid || '',
-                  fetchedAt: Date.now(),
-                  fromBrowser: true
-                };
-                STUDIO_STATUS.geminiReady = true;
-                STUDIO_STATUS.geminiMode = 'browser';
-                STUDIO_STATUS.geminiUser = wiz.authUser;
-                return cachedGeminiSession;
-              }
+            if (!forceRefresh && cachedGeminiSession && cachedGeminiSession.at && (Date.now() - cachedGeminiSession.fetchedAt) < SESSION_TTL_MS) {
+              return cachedGeminiSession;
+            }
+            if (geminiBrowserContext) {
+              const liveSess = await extractGeminiSessionFromLiveBrowser(forceRefresh);
+              if (liveSess && liveSess.at) return liveSess;
             }
 
             if (!forceRefresh && cachedGeminiSession && cachedGeminiSession.at && (Date.now() - cachedGeminiSession.fetchedAt) < SESSION_TTL_MS) {
@@ -7081,25 +7114,28 @@ jobs:
             const deadline = Date.now() + 15 * 60 * 1000;
             while (Date.now() < deadline) {
               try {
-                const wiz = await page.evaluate(() => {
-                  const w = window.WIZ_global_data || {};
-                  return { at: w.SNlM0e || '', bl: w.cfb2h || '', fSid: w.FdrFJe || '', authUser: Number(w.eptZe ?? 0) || 0 };
-                });
-                if (wiz && wiz.at) {
-                  const liveCookies = await metaBrowserCtx.cookies('https://gemini.google.com').catch(() => []);
-                  if (liveCookies.length) {
-                    COOKIE_HEADER = buildCookieHeader({ cookies: liveCookies });
-                    COOKIE_HEADER_MIN = buildMinimalCookieHeader({ cookies: liveCookies });
+                const liveCookies = await metaBrowserCtx.cookies(['https://gemini.google.com', 'https://google.com']).catch(() => []);
+                const hasAuth = liveCookies.some(c => c && (c.name === '__Secure-1PSID' || c.name === '__Secure-3PSID' || c.name === 'SAPISID') && c.value);
+                if (hasAuth) {
+                  COOKIE_HEADER = buildCookieHeader({ cookies: liveCookies });
+                  COOKIE_HEADER_MIN = buildMinimalCookieHeader({ cookies: liveCookies });
+                  const activePage = metaBrowserCtx.pages().find(p => !p.isClosed() && /gemini\.google\.com/i.test(p.url() || '')) || page;
+                  const html = await activePage.content().catch(() => '');
+                  const at = (html.match(/"SNlM0e"\s*:\s*"([^"]+)"/) || [])[1] || '';
+                  const bl = (html.match(/"cfb2h"\s*:\s*"([^"]+)"/) || [])[1] || 'boq_gemini-web-uiserver_20261122.16_p0';
+                  const fSid = (html.match(/"FdrFJe"\s*:\s*"(-?\d+)"/) || [])[1] || '';
+                  const uMatch = (activePage.url() || '').match(/\/u\/(\d+)/);
+                  const authUser = uMatch ? parseInt(uMatch[1], 10) : 0;
+                  if (at) {
+                    cachedGeminiSession = { authUser, at, bl, fSid, fetchedAt: Date.now() };
+                    console.log(`✅ Live Gemini Browser signed in! (u/${authUser}, bl=${bl})\n`);
+                    return;
                   }
-                  cachedGeminiSession = {
-                    authUser: wiz.authUser,
-                    at: wiz.at,
-                    bl: wiz.bl || 'boq_gemini-web-uiserver_20261122.16_p0',
-                    fSid: wiz.fSid || '',
-                    fetchedAt: Date.now()
-                  };
-                  console.log(`✅ Live Gemini Browser signed in! (u/${wiz.authUser}, bl=${cachedGeminiSession.bl})\n`);
-                  return;
+                  try {
+                    cachedGeminiSession = await fetchGeminiSession(authUser, COOKIE_HEADER);
+                    console.log(`✅ Live Gemini Browser signed in via cookies! (u/${cachedGeminiSession.authUser}, bl=${cachedGeminiSession.bl})\n`);
+                    return;
+                  } catch {}
                 }
               } catch {}
               await sleep(3000);
