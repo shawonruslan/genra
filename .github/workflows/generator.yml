@@ -3109,10 +3109,12 @@ jobs:
                        !lower.startsWith('the') &&
                        !lower.startsWith('this');
               });
-            if (lines.length > 0) {
-              return lines[0].replace(/^["'*\s]+|["'*\s]+$/g, '').trim().slice(0, 30);
-            }
-            return raw.replace(/^["'*\s]+|["'*\s]+$/g, '').slice(0, 30).trim();
+            let out = lines.length > 0
+              ? lines[0].replace(/^["'*\s]+|["'*\s]+$/g, '').trim()
+              : raw.replace(/^["'*\s]+|["'*\s]+$/g, '').trim();
+            // Never allow V1/V2/Take 1/#1/Part 1/Mix 1 suffixes (Zedge duplicate spam risk)
+            out = out.replace(/(?:\s*[-–—:(]?\s*(?:v|ver|version|take|part|pt|mix|alt|edit|track|#)\s*\d+\)?)+$/i, '').replace(/\s+\d+$/, '').trim();
+            return out.slice(0, 28).trim();
           }
 
           function cleanKeywords(raw) {
@@ -3143,9 +3145,9 @@ jobs:
             if (!raw) return '';
             const quoteMatch = raw.match(/"([^"\r\n]{3,100})"/);
             let text = quoteMatch ? quoteMatch[1] : raw;
-            text = text.replace(/^(here is a short description:|description:)/i, '').trim();
+            text = text.replace(/^(here is a short description:|description:)/i, '').replace(/[.,!?;:"'()\[\]]+/g, ' ').trim();
             const words = text.split(/\s+/).filter(Boolean);
-            return words.slice(0, 5).join(' ');
+            return words.slice(0, 3).join(' ').slice(0, 28).trim();
           }
 
           // ─── ZEDGE CONTENT POLICY GUARD ────────────────────────────────────────────
@@ -3227,7 +3229,7 @@ jobs:
           1. A creative and UNIQUE title (max 25 characters). DO NOT USE THESE BANNED WORDS: {{BANNED_WORDS}}. No quotes.
           2. 10 relevant, descriptive SINGLE-WORD keywords (comma-separated) that truthfully describe THIS sound only. Every keyword must correspond to an instrument, genre, or mood present in the audio prompt.
           3. The most appropriate category selected ONLY from this list: {{VALID_CATEGORIES}}.
-          4. A SHORT description in MAXIMUM 5 WORDS capturing the soul of the sound. No punctuation.
+          4. An ULTRA-SHORT description in EXACTLY 2 TO 3 WORDS (max 25 chars) capturing the core sound. No punctuation, no filler.
 
           CRITICAL: Format your entire response EXACTLY like this template with no text outside these tags:
           [ENHANCED_PROMPT]...[/ENHANCED_PROMPT]
@@ -3459,6 +3461,172 @@ jobs:
               category: finalCategory,
               description: finalDesc
             };
+          }
+
+          // ─── GENERATE 100% UNIQUE TITLE, TAGS & ULTRA-SHORT DESCRIPTION PER TAKE ───
+          async function generateUniqueTakeMetadatas(baseMeta, totalTakes, cfg = {}) {
+            const firstClean = {
+              ...baseMeta,
+              title: cleanTitle(baseMeta.title) || 'Fresh Studio Tone',
+              description: cleanDescription(baseMeta.description) || cleanTitle(baseMeta.title).split(' ').slice(0, 3).join(' ')
+            };
+            if (totalTakes <= 1) return [firstClean];
+
+            const validCategories = VALID_RT_CATS.filter(c => c !== 'OTHER').join(', ');
+            const bannedWords = cfg.bannedWords || DEFAULT_BANNED_WORDS;
+            const shape = String(cfg.audioShape || STUDIO_CONFIG.audioShape || 'track').toLowerCase();
+            const musicalKey = String(cfg.musicalKey || STUDIO_CONFIG.musicalKey || 'Auto').trim();
+            const recentTitles = RECENT_CONCEPTS.map(c => c.split(' — ')[0]).filter(Boolean);
+
+            const normalizeKey = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+            const tagListOf = (s) => String(s || '').split(',').map(w => w.trim().toLowerCase()).filter(Boolean);
+            const tagOverlapRatio = (a, b) => {
+              const sa = new Set(tagListOf(a));
+              const sb = new Set(tagListOf(b));
+              if (!sa.size || !sb.size) return 0;
+              let common = 0;
+              for (const x of sa) if (sb.has(x)) common++;
+              return common / Math.max(sa.size, sb.size);
+            };
+
+            const results = [firstClean];
+            const usedTitles = new Set([normalizeKey(firstClean.title), ...recentTitles.map(normalizeKey)]);
+            const usedDescs  = new Set([normalizeKey(firstClean.description)]);
+
+            const needCount = totalTakes - 1;
+
+            for (let attempt = 1; attempt <= 3 && results.length < totalTakes; attempt++) {
+              const remaining = totalTakes - results.length;
+              const avoidTitlesList = [...usedTitles].slice(-12).join(', ');
+              const avoidDescsList  = [...usedDescs].slice(-8).join(', ');
+              const existingTags    = results.map(r => r.tags).join(' | ');
+
+              const multiPrompt = [
+                'You are a Zedge marketplace audio metadata expert.',
+                `We generated ${totalTakes} separate audio variations from one musical concept. Zedge PERMANENTLY SUSPENDS accounts if uploads have duplicate/similar titles, numbered suffixes (V1, V2, V3, V4, #1, Take 1, Part 1, Mix 1), identical tag lists, or repetitive descriptions.`,
+                '',
+                ZEDGE_POLICY_RULES,
+                '',
+                'AUDIO CONCEPT:',
+                `- Prompt: ${baseMeta.enhancedPrompt}`,
+                `- Shape: ${shape} | Key: ${musicalKey} | Primary Category: ${baseMeta.category}`,
+                `- Already used titles (DO NOT repeat or share main words with these): ${avoidTitlesList}`,
+                `- Already used descriptions (DO NOT repeat): ${avoidDescsList}`,
+                `- Already used tag sets (use fresh, different descriptive synonyms/moods/angles): ${existingTags}`,
+                '',
+                'TASK:',
+                `Create ${remaining} COMPLETELY DISTINCT, standalone Zedge metadata sets for the remaining ${remaining} audio tracks.`,
+                'RULES FOR EVERY SET:',
+                `1. TITLE: 100% unique creative 2-3 word title (max 25 chars). ZERO numbers, ZERO V1/V2/V3/V4, ZERO "Mix/Take/Version/Alt/Part/Loop". Do NOT use banned words: ${bannedWords}.`,
+                '2. KEYWORDS: 8-10 descriptive SINGLE-WORD tags (comma-separated) tailored to this variation using fresh vocabulary (at least half the words must differ from the other takes).',
+                `3. CATEGORY: Pick ONE from: ${validCategories}.`,
+                '4. DESCRIPTION: ULTRA-SHORT, EXACTLY 2 TO 3 WORDS (max 25 chars), no punctuation, completely unique wording.',
+                '',
+                'Respond ONLY in this exact format:',
+                ...Array.from({ length: remaining }, (_, idx) => {
+                  const n = idx + 1;
+                  return `[SET_${n}]\n[TITLE]...[/TITLE]\n[KEYWORDS]...[/KEYWORDS]\n[CATEGORY]...[/CATEGORY]\n[DESCRIPTION]...[/DESCRIPTION]\n[/SET_${n}]`;
+                })
+              ].join('\n');
+
+              try {
+                const rawReply = await callGeminiRpc(multiPrompt);
+                const extractField = (block, tag) => {
+                  const re = new RegExp(`\\[\\s*${tag}\\s*\\]\\s*:?([\\s\\S]*?)(?:\\[\\s*\\/\\s*${tag}\\s*\\]|(?=\\[\\s*(?:TITLE|KEYWORDS|CATEGORY|DESCRIPTION|\\/SET_)\\s*\\])|$)`, 'i');
+                  const m = block.match(re);
+                  return m ? m[1].replace(/\*\*/g, '').replace(/^`+|`+$/g, '').trim() : '';
+                };
+
+                const setBlocks = [];
+                for (let n = 1; n <= remaining; n++) {
+                  const m = rawReply.match(new RegExp(`\\[\\s*SET_${n}\\s*\\]([\\s\\S]*?)(?:\\[\\s*\\/\\s*SET_${n}\\s*\\]|(?=\\[\\s*SET_${n + 1}\\s*\\])|$)`, 'i'));
+                  if (m && m[1]) setBlocks.push(m[1]);
+                }
+
+                for (const block of setBlocks) {
+                  if (results.length >= totalTakes) break;
+                  const tTitle = cleanTitle(extractField(block, 'TITLE'));
+                  const tTags  = cleanKeywords(extractField(block, 'KEYWORDS'));
+                  const tCat   = cleanCategory(extractField(block, 'CATEGORY') || baseMeta.category);
+                  const tDesc  = cleanDescription(extractField(block, 'DESCRIPTION'));
+                  if (!tTitle || tTitle.length < 3 || !tTags || !tDesc) continue;
+
+                  const normT = normalizeKey(tTitle);
+                  const normD = normalizeKey(tDesc);
+                  if (usedTitles.has(normT) || usedDescs.has(normD)) continue;
+
+                  const checked = zedgeEnforce({
+                    enhancedPrompt: baseMeta.enhancedPrompt,
+                    title: tTitle,
+                    tags: tTags,
+                    category: tCat,
+                    description: tDesc
+                  }, 'audio');
+                  if (checked.issues.length) continue;
+
+                  // Ensure tag set isn't near-identical to an earlier take
+                  let finalTagsStr = checked.meta.tags;
+                  if (results.some(prev => tagOverlapRatio(prev.tags, finalTagsStr) > 0.7)) {
+                    const extras = ['melodic', 'crisp', 'warm', 'bright', 'smooth', 'rhythmic', 'harmonic', 'acoustic', 'lush', 'clean', 'deep', 'vivid', 'mellow', 'punchy', 'fresh', 'rich'];
+                    const cur = tagListOf(finalTagsStr);
+                    const freshExtras = extras.filter(w => !cur.includes(w)).sort(() => Math.random() - 0.5).slice(0, 4);
+                    finalTagsStr = [...cur.slice(0, 6), ...freshExtras].slice(0, 10).join(', ');
+                  }
+
+                  const finalTakeMeta = { ...checked.meta, tags: finalTagsStr };
+                  usedTitles.add(normT);
+                  usedDescs.add(normD);
+                  rememberConcept(finalTakeMeta.title, baseMeta.enhancedPrompt);
+                  results.push(finalTakeMeta);
+                }
+              } catch (e) {
+                console.warn(`  Unique take metadata batch attempt ${attempt}/3 failed: ${e.message}`);
+              }
+            }
+
+            // Deterministic zero-V1/V2 fallback if any slot still missing
+            const fallbackAdjs   = ['Velvet', 'Golden', 'Silver', 'Amber', 'Crimson', 'Cobalt', 'Misty', 'Solar', 'Lunar', 'Coral', 'Ivory', 'Emerald', 'Saffron', 'Indigo'];
+            const fallbackNouns  = ['Horizon', 'Breeze', 'Cascade', 'Mirage', 'Meadow', 'Lantern', 'Ripple', 'Drift', 'Bloom', 'Spark', 'Cadence', 'Whisper', 'Glimmer', 'Chime'];
+            const fallbackMoods  = ['Warm', 'Crisp', 'Bright', 'Smooth', 'Gentle', 'Lively', 'Mellow', 'Rich', 'Airy', 'Bold'];
+            const fallbackForms  = ['melody', 'groove', 'motif', 'chime', 'pluck', 'cadence', 'harmony', 'rhythm'];
+            const fallbackTagPool = ['melodic', 'acoustic', 'warm', 'crisp', 'smooth', 'bright', 'harmonic', 'rhythmic', 'lush', 'mellow', 'clean', 'vivid', 'rich', 'gentle', 'airy', 'punchy', 'fresh', 'deep', 'uplifting', 'calm'];
+
+            while (results.length < totalTakes) {
+              let fbTitle = '';
+              for (let tries = 0; tries < 25; tries++) {
+                const a = fallbackAdjs[Math.floor(Math.random() * fallbackAdjs.length)];
+                const n = fallbackNouns[Math.floor(Math.random() * fallbackNouns.length)];
+                const cand = `${a} ${n}`;
+                if (!usedTitles.has(normalizeKey(cand))) { fbTitle = cand; break; }
+              }
+              if (!fbTitle) fbTitle = `Studio Motif ${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
+
+              let fbDesc = '';
+              for (let tries = 0; tries < 25; tries++) {
+                const m = fallbackMoods[Math.floor(Math.random() * fallbackMoods.length)];
+                const f = fallbackForms[Math.floor(Math.random() * fallbackForms.length)];
+                const cand = cleanDescription(`${m} ${shape === 'oneshot' ? 'alert' : shape} ${f}`);
+                if (!usedDescs.has(normalizeKey(cand))) { fbDesc = cand; break; }
+              }
+              if (!fbDesc) fbDesc = cleanDescription(fbTitle);
+
+              const baseTags = tagListOf(firstClean.tags).slice(0, 3);
+              const freshPool = [...fallbackTagPool].sort(() => Math.random() - 0.5).filter(w => !baseTags.includes(w)).slice(0, 6);
+              const checked = zedgeEnforce({
+                enhancedPrompt: baseMeta.enhancedPrompt,
+                title: fbTitle,
+                tags: [...baseTags, ...freshPool].join(', '),
+                category: baseMeta.category,
+                description: fbDesc
+              }, 'audio');
+
+              usedTitles.add(normalizeKey(checked.meta.title));
+              usedDescs.add(normalizeKey(checked.meta.description));
+              rememberConcept(checked.meta.title, baseMeta.enhancedPrompt);
+              results.push(checked.meta);
+            }
+
+            return results;
           }
 
           // ─── CREDENTIAL & MULTI-PROVIDER TEMP-MAIL HELPERS ─────────────────────────
@@ -4622,6 +4790,9 @@ jobs:
             const jobInfo = await generateStableAudio(meta.enhancedPrompt, durSec, cfg);
             const stems = await pollStableAudioResult(jobInfo.jobId);
             const totalTakes = stems.length;
+
+            STUDIO_STATUS.currentTask = `[${dbTarget.name}] Creating ${totalTakes} unique Zedge titles, tags & short descriptions...`;
+            const takeMetas = await generateUniqueTakeMetadatas(meta, totalTakes, cfg);
             const createdItems = [];
 
             for (let idx = 0; idx < totalTakes; idx++) {
@@ -4629,9 +4800,8 @@ jobs:
               const stem = stems[idx];
               const takeNum = idx + 1;
               const takeSeed = stem?.generation_settings?.seed ?? (jobInfo.baseSeed + idx);
-              const takeTitle = totalTakes > 1
-                ? `${meta.title.slice(0, 27).trim()} V${takeNum}`
-                : meta.title;
+              const tMeta = takeMetas[idx] || meta;
+              const takeTitle = tMeta.title;
 
               STUDIO_STATUS.currentTask = `[${dbTarget.name}] Downloading Take ${takeNum}/${totalTakes} ("${takeTitle}")...`;
               let audioBuffer = await downloadStableAudioStem(jobInfo.jobId, stem);
@@ -4674,9 +4844,9 @@ jobs:
                 contentType: 'RINGTONE',
                 fileUrl,
                 title: takeTitle,
-                tags: meta.tags,
-                category: meta.category,
-                description: meta.description,
+                tags: tMeta.tags,
+                category: tMeta.category,
+                description: tMeta.description,
                 policyCheck: 'passed',
                 policyCheckedAt: createdAt,
                 status: 'queued',
@@ -4709,9 +4879,9 @@ jobs:
                 firebaseKey: key,
                 keys: [{ dbName: dbTarget.name, key }],
                 title: takeTitle,
-                tags: meta.tags,
-                category: meta.category,
-                description: meta.description,
+                tags: tMeta.tags,
+                category: tMeta.category,
+                description: tMeta.description,
                 prompt: prompt || meta.enhancedPrompt,
                 enhancedPrompt: jobInfo.finalPrompt,
                 fileUrl,
