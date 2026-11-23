@@ -81,37 +81,58 @@ jobs:
             ffmpeg -version | head -n 1
           fi
 
-      - name: 🖥️ Start Virtual Display (Xvfb for Stable Audio OTP Auto-Account)
+      - name: 🖥️ Start Virtual Display + Live Gemini Login Browser (Xvfb + noVNC)
         run: |
-          if ! command -v Xvfb >/dev/null 2>&1; then
+          NEED_PKGS=""
+          command -v Xvfb >/dev/null 2>&1 || NEED_PKGS="$NEED_PKGS xvfb"
+          command -v x11vnc >/dev/null 2>&1 || NEED_PKGS="$NEED_PKGS x11vnc"
+          command -v openbox >/dev/null 2>&1 || NEED_PKGS="$NEED_PKGS openbox"
+          [ -d /usr/share/novnc ] || NEED_PKGS="$NEED_PKGS novnc websockify"
+          if [ -n "$NEED_PKGS" ]; then
             sudo apt-get update -qq
-            sudo apt-get install -y --no-install-recommends xvfb
+            sudo apt-get install -y --no-install-recommends $NEED_PKGS
           fi
-          RUNNER_TRACKING_ID="" Xvfb :99 -screen 0 1920x1080x24 >/dev/null 2>&1 &
+          RUNNER_TRACKING_ID="" Xvfb :99 -screen 0 1366x820x24 >/dev/null 2>&1 &
           sleep 1
+          DISPLAY=:99 RUNNER_TRACKING_ID="" openbox >/dev/null 2>&1 &
+          sleep 1
+          RUNNER_TRACKING_ID="" x11vnc -display :99 -forever -shared -nopw -rfbport 5900 -bg -o /tmp/x11vnc.log >/dev/null 2>&1 || true
+          RUNNER_TRACKING_ID="" nohup websockify --web=/usr/share/novnc 6080 localhost:5900 > /tmp/novnc.log 2>&1 </dev/null &
           echo "DISPLAY=:99" >> $GITHUB_ENV
-          echo "✅ Xvfb virtual display started on :99"
+          echo "✅ Xvfb + x11vnc + noVNC live browser display ready on :99 (port 6080)"
 
-      - name: 🌐 Start TryCloudflare Quick Tunnel (Port 8787)
+      - name: 🌐 Start TryCloudflare Quick Tunnels (Studio Port 8787 + Gemini Login Browser Port 6080)
         run: |
           RUNNER_TRACKING_ID="" nohup cloudflared tunnel --url http://127.0.0.1:8787 --no-autoupdate > /tmp/cloudflared.log 2>&1 </dev/null &
+          RUNNER_TRACKING_ID="" nohup cloudflared tunnel --url http://127.0.0.1:6080 --no-autoupdate > /tmp/cloudflared_vnc.log 2>&1 </dev/null &
           TUNNEL_URL=""
+          VNC_BASE=""
           for i in $(seq 1 30); do
             sleep 1
-            TUNNEL_URL=$(grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' /tmp/cloudflared.log | head -n 1 || true)
-            if [ -n "$TUNNEL_URL" ]; then
+            [ -z "$TUNNEL_URL" ] && TUNNEL_URL=$(grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' /tmp/cloudflared.log | head -n 1 || true)
+            [ -z "$VNC_BASE" ] && VNC_BASE=$(grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' /tmp/cloudflared_vnc.log | head -n 1 || true)
+            if [ -n "$TUNNEL_URL" ] && [ -n "$VNC_BASE" ]; then
               break
             fi
           done
+          GEMINI_VNC_URL=""
+          if [ -n "$VNC_BASE" ]; then
+            GEMINI_VNC_URL="${VNC_BASE}/vnc.html?autoconnect=true&resize=scale"
+          fi
           echo "=================================================================="
-          echo "  🌐 TRYCLOUDFLARE RINGTONE STUDIO URL: ${TUNNEL_URL}"
+          echo "  🌐 RINGTONE STUDIO URL      : ${TUNNEL_URL}"
+          echo "  🔐 GEMINI BROWSER LOGIN URL : ${GEMINI_VNC_URL}"
           echo "=================================================================="
           echo "TRYCLOUDFLARE_URL=${TUNNEL_URL}" >> $GITHUB_ENV
+          echo "GEMINI_VNC_URL=${GEMINI_VNC_URL}" >> $GITHUB_ENV
+          echo "## 🌐 Live Ringtone Studio Pro (TryCloudflare)" >> $GITHUB_STEP_SUMMARY
           if [ -n "$TUNNEL_URL" ]; then
-            echo "## 🌐 Live Ringtone Studio Pro (TryCloudflare)" >> $GITHUB_STEP_SUMMARY
-            echo "**Open Web Interface:** [${TUNNEL_URL}](${TUNNEL_URL})" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "- **Ringtone Studio Panel:** [${TUNNEL_URL}](${TUNNEL_URL})" >> $GITHUB_STEP_SUMMARY
           fi
+          if [ -n "$GEMINI_VNC_URL" ]; then
+            echo "- **Gemini Browser Login (Gmail Sign-In, No Cookies Needed):** [${GEMINI_VNC_URL}](${GEMINI_VNC_URL})" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
 
       - name: 🎵 Launch Ringtone Web Studio & Gemini RPC Generator
         env:
@@ -127,6 +148,7 @@ jobs:
           AUTO_GENERATE_COUNT: "0"
           STUDIO_PORT: "8787"
           STUDIO_MAX_MINUTES: "180"
+          GEMINI_VNC_URL: ${{ env.GEMINI_VNC_URL }}
           NODE_OPTIONS: --max-http-header-size=262144
         run: |
           cat > studio.html << 'STUDIO_HTML_EOF'
@@ -1201,13 +1223,17 @@ jobs:
               </div>
 
               <div class="topbar-status">
-                <div class="status-pill" title="Gemini Web RPC Direct StreamGenerate Status">
-                  <span class="dot online" id="geminiDot"></span>
-                  <span id="geminiStatusText">Gemini RPC: Ready</span>
+                <div class="status-pill" title="Live Gemini Browser Session Status">
+                  <span class="dot busy" id="geminiDot"></span>
+                  <span id="geminiStatusText">Gemini: Waiting Login</span>
                 </div>
-                <div class="status-pill" title="Stable Audio v2.5 API Token Status">
-                  <span class="dot online" id="saDot"></span>
-                  <span id="saStatusText">Stable Audio: Active</span>
+                <a class="btn btn-ghost" id="geminiVncBtn" href="#" target="_blank" rel="noopener" style="display:none; text-decoration:none;" title="Open live browser to sign in to Gmail / Gemini directly (no cookies needed)">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+                  Gemini Login
+                </a>
+                <div class="status-pill" title="Stable Audio Wizard Account &amp; Remaining Credits">
+                  <span class="dot busy" id="saDot"></span>
+                  <span id="saStatusText">Stable Audio: Init</span>
                 </div>
                 <button class="btn btn-ghost" onclick="rotateStableToken()" title="Auto-create or replace Stable Audio account token">
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/></svg>
@@ -1216,6 +1242,10 @@ jobs:
                 <button class="btn btn-ghost" onclick="syncFirebaseAudios()" title="Reload generated audios from Firebase">
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5V19A9 3 0 0 0 21 19V5"/><path d="M3 12A9 3 0 0 0 21 12"/></svg>
                   Sync DB
+                </button>
+                <button class="btn btn-ghost" onclick="cleanR2Orphans()" title="Scan and delete orphaned files in R2 that are no longer in any Firebase queue">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>
+                  Clean R2
                 </button>
                 <button class="btn btn-ghost" onclick="lockStudioSession()" title="Lock Studio Panel (Log Out)">
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
@@ -1637,11 +1667,11 @@ jobs:
 
                   <div class="toggle-row">
                     <div>
-                      <div style="font-weight:600; font-size:12px;">Trim Leading / Trailing Silence</div>
-                      <div class="field-hint">Off by default to keep exact desired duration &amp; seamless loops (always skipped in Loop mode)</div>
+                      <div style="font-weight:600; font-size:12px;">Trim Leading / Trailing Silence (Fill Full Duration)</div>
+                      <div class="field-hint">Generates +4s buffer, strips dead start/end silence, and fits exact desired duration cleanly</div>
                     </div>
                     <label class="switch">
-                      <input type="checkbox" id="trimSilenceToggle" />
+                      <input type="checkbox" id="trimSilenceToggle" checked />
                       <span class="slider"></span>
                     </label>
                   </div>
@@ -2138,6 +2168,39 @@ jobs:
                 }
               }
 
+              async function cleanR2Orphans() {
+                try {
+                  showToast('Scanning R2 bucket & all Firebase queues for orphan files...');
+                  const scanRes = await fetch('/api/clean-r2-orphans', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ dryRun: true })
+                  });
+                  const scan = await scanRes.json();
+                  if (!scanRes.ok) throw new Error(scan.error || 'R2 orphan scan failed');
+                  if (!scan.orphanCount) {
+                    showToast(`No R2 orphans found! (${scan.totalR2} R2 files, all ${scan.activeKeysCount} active)`);
+                    return;
+                  }
+                  const mb = (scan.orphanBytes / (1024 * 1024)).toFixed(2);
+                  const preview = (scan.sampleKeys || []).slice(0, 6).join('\n');
+                  const msg = `Found ${scan.orphanCount} orphan file(s) (${mb} MB) in R2 that are NOT in any Firebase queue (${scan.dbsChecked.join(', ')}).\n\nSample:\n${preview}${scan.orphanCount > 6 ? '\n...' : ''}\n\nDelete these ${scan.orphanCount} orphan file(s) permanently from R2?`;
+                  if (!confirm(msg)) return;
+                  showToast(`Deleting ${scan.orphanCount} orphan file(s) from R2...`);
+                  const delRes = await fetch('/api/clean-r2-orphans', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ dryRun: false })
+                  });
+                  const del = await delRes.json();
+                  if (!delRes.ok) throw new Error(del.error || 'R2 orphan cleanup failed');
+                  const delMb = (del.deletedBytes / (1024 * 1024)).toFixed(2);
+                  showToast(`Cleaned ${del.deletedCount}/${del.orphanCount} R2 orphan(s) (${delMb} MB)` + (del.failedCount ? ` — ${del.failedCount} failed` : ''));
+                } catch (e) {
+                  showToast(e.message, true);
+                }
+              }
+
               async function rotateStableToken() {
                 if (!confirm('Create a new Stable Audio account and rotate bearer token now?')) return;
                 try {
@@ -2294,7 +2357,7 @@ jobs:
               async function deleteAudioItem(id) {
                 const item = allAudios.find(a => a.id === id);
                 if (!item) return;
-                if (!confirm(`Delete "${item.title}" permanently from Firebase (${item.dbName}) and studio library?`)) return;
+                if (!confirm(`Delete "${item.title}" permanently from Firebase (${item.dbName}) & R2 storage?`)) return;
 
                 try {
                   if (activeCardId === id) stopAllAudio();
@@ -2305,6 +2368,7 @@ jobs:
                       id: item.id,
                       dbName: item.dbName,
                       firebaseKey: item.firebaseKey,
+                      fileUrl: item.fileUrl || '',
                       keys: item.keys || []
                     })
                   });
@@ -2312,7 +2376,7 @@ jobs:
                   if (!res.ok) throw new Error(data.error || 'Delete failed');
                   allAudios = allAudios.filter(a => a.id !== id);
                   renderAudioGrid();
-                  showToast(`Deleted "${item.title}" from Firebase & queue`);
+                  showToast(data.r2Deleted ? `Deleted "${item.title}" from Firebase & R2` : `Deleted "${item.title}" from Firebase & queue`);
                 } catch (e) {
                   showToast(e.message, true);
                 }
@@ -2575,6 +2639,16 @@ jobs:
                     if (data.config.timeSignature) document.getElementById('timeSignatureSelect').value = data.config.timeSignature;
                     if (data.config.musicalKey) document.getElementById('keySelect').value = data.config.musicalKey;
                     if (data.config.trimSilence != null) document.getElementById('trimSilenceToggle').checked = !!data.config.trimSilence;
+                    if (data.config.bpm != null) {
+                      if (data.config.bpm === 'Auto') {
+                        document.getElementById('bpmAutoToggle').checked = true;
+                        toggleBpmMode();
+                      } else {
+                        document.getElementById('bpmAutoToggle').checked = false;
+                        toggleBpmMode();
+                        setBpmValue(data.config.bpm);
+                      }
+                    }
                     if (data.config.lengthSeconds) syncDuration(data.config.lengthSeconds);
                     if (data.config.volumeBoostPct) {
                       document.getElementById('volumeBoostSlider').value = data.config.volumeBoostPct;
@@ -2591,19 +2665,28 @@ jobs:
                   // Update Topbar Status
                   const gDot = document.getElementById('geminiDot');
                   const gTxt = document.getElementById('geminiStatusText');
+                  const vncBtn = document.getElementById('geminiVncBtn');
+                  if (vncBtn && data.status?.geminiVncUrl) {
+                    vncBtn.href = data.status.geminiVncUrl;
+                    vncBtn.style.display = 'inline-flex';
+                  }
                   if (data.status?.geminiReady) {
                     gDot.className = 'dot online';
-                    gTxt.textContent = `Gemini RPC: u/${data.status.geminiUser ?? 0} Ready`;
+                    const modeTag = data.status.geminiMode === 'browser' ? 'Live Browser' : `u/${data.status.geminiUser ?? 0}`;
+                    gTxt.textContent = `Gemini: ${modeTag} Ready`;
                   } else {
                     gDot.className = 'dot busy';
-                    gTxt.textContent = 'Gemini RPC: Connecting';
+                    gTxt.textContent = data.status?.geminiVncUrl ? 'Gemini: Login via VNC' : 'Gemini: Connecting';
                   }
 
                   const saDot = document.getElementById('saDot');
                   const saTxt = document.getElementById('saStatusText');
                   if (data.status?.stableAudioReady) {
                     saDot.className = 'dot online';
-                    saTxt.textContent = 'Stable Audio: Ready';
+                    const cr = data.status?.stableAudioCredits;
+                    saTxt.textContent = (cr && cr.remaining != null)
+                      ? `Stable Audio: ${cr.remaining}/${cr.total || 50} cr`
+                      : 'Stable Audio: Ready';
                   } else {
                     saDot.className = 'dot busy';
                     saTxt.textContent = 'Stable Audio: Auth/Init';
@@ -2677,6 +2760,7 @@ jobs:
           const GEMINI_SESSION_RAW   = (process.env.GEMINI_SESSION_INPUT?.trim() || process.env.GEMINI_SESSION || '').trim();
           const INITIAL_TARGET_ACC   = (process.env.TARGET_ACCOUNT || 'zedge_2').trim().toLowerCase();
           const QUEUE_PATH           = 'wallpaperQueue';
+          const R2_WORKER_URL        = (process.env.R2_WORKER_URL || 'https://frosty-pine-2f7dzedge-r2-gateway.holaexplainer.workers.dev').trim();
           const AUTO_GENERATE_COUNT  = parseInt(process.env.AUTO_GENERATE_COUNT || '10', 10);
           const INITIAL_LENGTH_SEC   = parseInt(process.env.LENGTH_SECONDS || '20', 10);
           const INITIAL_AUTO_PROCESS = process.env.AUTO_PROCESS !== 'false';
@@ -2733,90 +2817,79 @@ jobs:
           console.error = (...args) => { origErr(...args); pushStudioLog('ERROR: ' + args.join(' ')); };
 
           // ─── PARSE & NORMALIZE GEMINI SESSION (WEB RPC — NO PLAYWRIGHT BROWSER) ────
-          if (!GEMINI_SESSION_RAW) {
-            console.error('Error: GEMINI_SESSION secret or input is missing.');
-            process.exit(1);
-          }
+          const GEMINI_VNC_URL = (process.env.GEMINI_VNC_URL || '').trim();
+          let GEMINI_STORAGE_STATE = null;
 
           function normalizeCookies(rawCookies) {
-            return rawCookies.map(c => {
-              let sameSite = 'None';
-              if (c.sameSite) {
-                const ss = String(c.sameSite).toLowerCase();
-                if (ss === 'lax')                                  sameSite = 'Lax';
-                else if (ss === 'strict')                          sameSite = 'Strict';
-                else if (ss === 'none' || ss === 'no_restriction') sameSite = 'None';
-              }
-              const expires = c.expires !== undefined ? Math.floor(c.expires)
-                            : c.expirationDate !== undefined ? Math.floor(c.expirationDate)
-                            : -1;
-              return {
-                name:     c.name,
-                value:    c.value,
-                domain:   c.domain,
-                path:     c.path || '/',
-                expires,
-                httpOnly: !!c.httpOnly,
-                secure:   !!c.secure,
-                sameSite,
-              };
-            });
+            return rawCookies
+              .filter(c => c && c.name && c.value !== undefined)
+              .map(c => {
+                let sameSite = 'Lax';
+                if (c.sameSite) {
+                  const ss = String(c.sameSite).toLowerCase();
+                  if (ss === 'no_restriction' || ss === 'none') sameSite = 'None';
+                  else if (ss === 'strict') sameSite = 'Strict';
+                  else sameSite = 'Lax';
+                }
+                const out = {
+                  name: String(c.name),
+                  value: String(c.value),
+                  domain: c.domain || '.google.com',
+                  path: c.path || '/',
+                  httpOnly: Boolean(c.httpOnly),
+                  secure: sameSite === 'None' ? true : Boolean(c.secure),
+                  sameSite
+                };
+                if (typeof c.expirationDate === 'number' && c.expirationDate > 0) out.expires = c.expirationDate;
+                else if (typeof c.expires === 'number' && c.expires > 0) out.expires = c.expires;
+                else out.expires = -1;
+                return out;
+              });
           }
 
-          let GEMINI_STORAGE_STATE = null;
-          try {
-            const parsed = JSON.parse(GEMINI_SESSION_RAW);
-            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && Array.isArray(parsed.cookies)) {
-              GEMINI_STORAGE_STATE = {
-                cookies: normalizeCookies(parsed.cookies),
-                origins: Array.isArray(parsed.origins) ? parsed.origins : []
-              };
-            } else if (Array.isArray(parsed) && parsed.length > 0 && parsed[0].name !== undefined) {
-              GEMINI_STORAGE_STATE = { cookies: normalizeCookies(parsed), origins: [] };
-            } else if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-              const altKeys = ['cookie', 'Cookie', 'cookieList', 'cookieJar', 'session'];
-              let found = null;
-              for (const k of altKeys) {
-                if (Array.isArray(parsed[k]) && parsed[k].length > 0) { found = parsed[k]; break; }
-              }
-              if (!found) {
-                for (const val of Object.values(parsed)) {
-                  if (val && typeof val === 'object' && Array.isArray(val.cookies) && val.cookies.length > 0) {
-                    found = val.cookies;
-                    break;
+          if (GEMINI_SESSION_RAW) {
+            try {
+              const parsed = JSON.parse(GEMINI_SESSION_RAW);
+              if (Array.isArray(parsed)) {
+                GEMINI_STORAGE_STATE = { cookies: normalizeCookies(parsed), origins: [] };
+              } else if (parsed && Array.isArray(parsed.cookies)) {
+                GEMINI_STORAGE_STATE = { ...parsed, cookies: normalizeCookies(parsed.cookies) };
+              } else if (parsed && typeof parsed === 'object') {
+                let found = null;
+                for (const k of ['cookies', 'data', 'items', 'storageState', 'session']) {
+                  if (Array.isArray(parsed[k]) && parsed[k].length > 0) { found = parsed[k]; break; }
+                }
+                if (!found) {
+                  for (const val of Object.values(parsed)) {
+                    if (val && typeof val === 'object' && Array.isArray(val.cookies) && val.cookies.length > 0) {
+                      found = val.cookies;
+                      break;
+                    }
                   }
                 }
+                if (found) GEMINI_STORAGE_STATE = { cookies: normalizeCookies(found), origins: [] };
               }
-              if (found) {
-                GEMINI_STORAGE_STATE = { cookies: normalizeCookies(found), origins: [] };
-              }
+            } catch (e) {
+              console.warn('Optional GEMINI_SESSION JSON invalid (will use Live Browser Login instead):', e.message);
             }
-
-            if (!GEMINI_STORAGE_STATE || !Array.isArray(GEMINI_STORAGE_STATE.cookies) || GEMINI_STORAGE_STATE.cookies.length === 0) {
-              console.error('Error: Could not find any cookies in GEMINI_SESSION JSON.');
-              process.exit(1);
-            }
-          } catch (e) {
-            console.error('Error: GEMINI_SESSION is not valid JSON:', e.message);
-            process.exit(1);
           }
 
           const SKIPPED_COOKIES = new Set(['COMPASS', 'S', 'SEARCH_SAMESITE']);
           function buildCookieHeader(storageState) {
+            if (!storageState?.cookies?.length) return '';
             const byName = new Map();
             for (const c of storageState.cookies) {
               if (!c || !c.name || c.value === undefined || !c.domain) continue;
               if (!c.domain.includes('google.com')) continue;
               if (SKIPPED_COOKIES.has(c.name)) continue;
-              if (!byName.has(c.name) || c.domain === '.google.com') {
-                byName.set(c.name, c.value);
-              }
+              if (!byName.has(c.name) || c.domain === '.google.com') byName.set(c.name, c.value);
             }
             return [...byName.entries()].map(([k, v]) => `${k}=${v}`).join('; ');
           }
-          const COOKIE_HEADER = buildCookieHeader(GEMINI_STORAGE_STATE);
+          let COOKIE_HEADER = buildCookieHeader(GEMINI_STORAGE_STATE);
 
           function buildMinimalCookieHeader(storageState) {
+            if (!storageState?.cookies?.length) return '';
             const ESSENTIAL = new Set([
               'SID', 'HSID', 'SSID', 'APISID', 'SAPISID',
               '__Secure-1PSID', '__Secure-3PSID', '__Secure-1PAPISID', '__Secure-3PAPISID',
@@ -2831,8 +2904,12 @@ jobs:
             }
             return [...byName.entries()].map(([k, v]) => `${k}=${v}`).join('; ');
           }
-          const COOKIE_HEADER_MIN = buildMinimalCookieHeader(GEMINI_STORAGE_STATE);
-          console.log(`Gemini RPC Cookie header ready: ${COOKIE_HEADER.split('; ').length} cookies (${COOKIE_HEADER.length} bytes)`);
+          let COOKIE_HEADER_MIN = buildMinimalCookieHeader(GEMINI_STORAGE_STATE);
+          if (COOKIE_HEADER) {
+            console.log(`Optional Gemini cookie header loaded (${COOKIE_HEADER.split('; ').length} cookies) — Live Browser Login also enabled.`);
+          } else {
+            console.log('No GEMINI_SESSION cookies needed — using Live Browser Login (noVNC tunnel)!');
+          }
 
           function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
           async function fetchWithTimeout(url, opts = {}, ms = 90000) {
@@ -2846,19 +2923,105 @@ jobs:
           }
 
           // ════════════════════════════════════════════════════════════════════════════
-          // GEMINI WEB RPC ENGINE (Direct HTTP StreamGenerate — No Browser Needed)
+          // LIVE PERSISTENT GEMINI BROWSER + IN-BROWSER STREAMGENERATE RPC ENGINE
           // ════════════════════════════════════════════════════════════════════════════
           const GEMINI_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
-          const SESSION_TTL_MS = 15 * 60 * 1000;
+          const SESSION_TTL_MS = 45 * 60 * 1000;
           let cachedGeminiSession = null;
+          let geminiBrowserContext = null;
+          let geminiBrowserPage = null;
+          let geminiBrowserReady = false;
+
+          async function startGeminiLiveBrowser() {
+            if (geminiBrowserContext) return;
+            const profileDir = '/tmp/gemini_live_browser_profile';
+            fs.mkdirSync(profileDir, { recursive: true });
+            try {
+              const { chromium: patchrightChromium } = await import('patchright');
+              const launchOpts = {
+                headless: false,
+                channel: 'chrome',
+                viewport: { width: 1320, height: 780 },
+                args: [
+                  '--no-sandbox',
+                  '--disable-setuid-sandbox',
+                  '--disable-dev-shm-usage',
+                  '--window-position=0,0',
+                  '--window-size=1320,780',
+                  '--disable-blink-features=AutomationControlled'
+                ]
+              };
+              try {
+                geminiBrowserContext = await patchrightChromium.launchPersistentContext(profileDir, launchOpts);
+              } catch {
+                delete launchOpts.channel;
+                geminiBrowserContext = await patchrightChromium.launchPersistentContext(profileDir, launchOpts);
+              }
+
+              if (GEMINI_STORAGE_STATE?.cookies?.length) {
+                await geminiBrowserContext.addCookies(GEMINI_STORAGE_STATE.cookies).catch(() => {});
+              }
+
+              geminiBrowserPage = geminiBrowserContext.pages()[0] || await geminiBrowserContext.newPage();
+              await geminiBrowserPage.goto('https://gemini.google.com/app', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
+              console.log('  🌐 Live Gemini Login Browser opened on DISPLAY=:99 (https://gemini.google.com/app)');
+              if (GEMINI_VNC_URL) {
+                console.log(`  🔐 Open this link to sign in to Gmail/Gemini: ${GEMINI_VNC_URL}`);
+              }
+
+              const checkBrowserLogin = async () => {
+                if (!geminiBrowserPage || geminiBrowserPage.isClosed()) return;
+                try {
+                  const url = geminiBrowserPage.url() || '';
+                  if (/gemini\.google\.com/i.test(url) && !/accounts\.google\.com|ServiceLogin/i.test(url)) {
+                    const wiz = await geminiBrowserPage.evaluate(() => {
+                      const g = window.WIZ_global_data || {};
+                      return {
+                        at: g.SNlM0e || '',
+                        bl: g.cfb2h || '',
+                        fSid: g.FdrFJe || '',
+                        authUser: Number(g.authuser || 0) || 0
+                      };
+                    }).catch(() => null);
+                    if (wiz && wiz.at) {
+                      cachedGeminiSession = {
+                        authUser: wiz.authUser,
+                        at: wiz.at,
+                        bl: wiz.bl || 'boq_gemini-web-uiserver_20261122.16_p0',
+                        fSid: wiz.fSid || '',
+                        fetchedAt: Date.now(),
+                        fromBrowser: true
+                      };
+                      const liveCookies = await geminiBrowserContext.cookies('https://gemini.google.com').catch(() => []);
+                      if (liveCookies.length) {
+                        COOKIE_HEADER = buildCookieHeader({ cookies: liveCookies });
+                        COOKIE_HEADER_MIN = buildMinimalCookieHeader({ cookies: liveCookies });
+                      }
+                      if (!geminiBrowserReady) {
+                        geminiBrowserReady = true;
+                        STUDIO_STATUS.geminiReady = true;
+                        STUDIO_STATUS.geminiMode = 'browser';
+                        STUDIO_STATUS.geminiUser = wiz.authUser;
+                        console.log(`  ✅ Live Gemini Browser signed in & ready! (u/${wiz.authUser}, bl=${cachedGeminiSession.bl})`);
+                      }
+                    }
+                  }
+                } catch {}
+              };
+
+              await checkBrowserLogin();
+              setInterval(checkBrowserLogin, 4000);
+            } catch (e) {
+              console.warn(`  ⚠️ Could not start Live Gemini Browser: ${e.message}`);
+            }
+          }
 
           async function fetchGeminiSession(authUser, cookieHeader = COOKIE_HEADER) {
+            if (!cookieHeader) throw new Error('No Gemini cookies available — please sign in via the Gemini Login Browser link.');
             const appUrls = [
               `https://gemini.google.com/u/${authUser}/app?authuser=${authUser}`,
-              `https://gemini.google.com/app?authuser=${authUser}`,
-              `https://gemini.google.com/u/${authUser}/app?authuser=${authUser}&hl=en`
+              `https://gemini.google.com/app?authuser=${authUser}`
             ];
-
             let lastErr = null;
             for (const appUrl of appUrls) {
               let res;
@@ -2873,21 +3036,14 @@ jobs:
                   }
                 }, 45000);
               } catch (e) {
-                if (/header overflow|HPE_HEADER_OVERFLOW/i.test(e.message || '')) {
-                  throw new Error(
-                    `HTTP header overflow on u/${authUser} — Node limit is ${(http.maxHeaderSize / 1024)} KB. Run with --max-http-header-size=262144.`
-                  );
-                }
                 lastErr = e;
                 continue;
               }
-
               const finalUrl = res.url || '';
               if (!res.ok || /accounts\.google\.com|ServiceLogin|\/signin|\/login/.test(finalUrl)) {
                 lastErr = new Error(`u/${authUser} not signed in (HTTP ${res.status}, landed on ${finalUrl.slice(0, 80)})`);
                 continue;
               }
-
               const html = await res.text();
               const atMatch   = html.match(/"SNlM0e":"([^"]+)"/);
               const blMatch   = html.match(/"cfb2h":"([^"]+)"/);
@@ -2899,44 +3055,62 @@ jobs:
               return {
                 authUser,
                 at: atMatch[1],
-                bl: blMatch ? blMatch[1] : 'boq_gemini-web-uiserver_20261106.06_p0',
+                bl: blMatch ? blMatch[1] : 'boq_gemini-web-uiserver_20261122.16_p0',
                 fSid: fSidMatch ? fSidMatch[1] : '',
-                fetchedAt: Date.now()
+                fetchedAt: Date.now(),
+                fromBrowser: false
               };
             }
-            throw lastErr || new Error(`u/${authUser}: could not bootstrap a Gemini RPC session`);
+            throw lastErr || new Error(`u/${authUser}: could not bootstrap Gemini session`);
           }
 
           async function getGeminiSession(forceRefresh = false) {
+            if (geminiBrowserPage && !geminiBrowserPage.isClosed()) {
+              if (forceRefresh) {
+                await geminiBrowserPage.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+                await sleep(2000);
+              }
+              const wiz = await geminiBrowserPage.evaluate(() => {
+                const g = window.WIZ_global_data || {};
+                return { at: g.SNlM0e || '', bl: g.cfb2h || '', fSid: g.FdrFJe || '', authUser: Number(g.authuser || 0) || 0 };
+              }).catch(() => null);
+              if (wiz && wiz.at) {
+                cachedGeminiSession = {
+                  authUser: wiz.authUser,
+                  at: wiz.at,
+                  bl: wiz.bl || 'boq_gemini-web-uiserver_20261122.16_p0',
+                  fSid: wiz.fSid || '',
+                  fetchedAt: Date.now(),
+                  fromBrowser: true
+                };
+                STUDIO_STATUS.geminiReady = true;
+                STUDIO_STATUS.geminiMode = 'browser';
+                STUDIO_STATUS.geminiUser = wiz.authUser;
+                return cachedGeminiSession;
+              }
+            }
+
             if (!forceRefresh && cachedGeminiSession && cachedGeminiSession.at && (Date.now() - cachedGeminiSession.fetchedAt) < SESSION_TTL_MS) {
               return cachedGeminiSession;
+            }
+            if (!COOKIE_HEADER) {
+              throw new Error(`Gemini not signed in yet! Open the Gemini Login Browser link (${GEMINI_VNC_URL || 'noVNC tunnel'}) and log into Gmail first.`);
             }
             const preferred = parseInt(process.env.GEMINI_AUTH_USER || '0', 10) || 0;
             try {
               cachedGeminiSession = await fetchGeminiSession(preferred, COOKIE_HEADER);
             } catch (e) {
-              console.warn(`Gemini u/${preferred} session failed (${e.message}) — retrying with minimal cookie set...`);
-              try {
-                cachedGeminiSession = await fetchGeminiSession(preferred, COOKIE_HEADER_MIN);
-                console.log('Minimal cookie set succeeded.');
-              } catch (e2) {
-                console.warn(`Minimal cookie set failed (${e2.message}) — scanning u/0..u/5...`);
-                let found = null;
-                for (const u of [0, 1, 2, 3, 4, 5]) {
-                  if (u === preferred) continue;
-                  try { found = await fetchGeminiSession(u, COOKIE_HEADER); break; } catch (_) {}
-                }
-                if (!found) throw e;
-                cachedGeminiSession = found;
-              }
+              cachedGeminiSession = await fetchGeminiSession(preferred, COOKIE_HEADER_MIN);
             }
-            console.log(`Gemini RPC session ready: account u/${cachedGeminiSession.authUser}, bl=${cachedGeminiSession.bl}`);
+            STUDIO_STATUS.geminiReady = true;
+            STUDIO_STATUS.geminiMode = 'cookie';
+            STUDIO_STATUS.geminiUser = cachedGeminiSession.authUser;
             return cachedGeminiSession;
           }
 
           function parseStreamGenerateResponse(rawText) {
             let assistantText = '';
-            for (const line of rawText.split('\n')) {
+            for (const line of String(rawText || '').split('\n')) {
               const trimmed = line.trim();
               if (!trimmed.startsWith('[')) continue;
               try {
@@ -2992,18 +3166,52 @@ jobs:
               for (let attempt = 0; attempt < 2; attempt++) {
                 try {
                   const reqId = Math.floor(100000 + Math.random() * 900000);
+                  const fReq = JSON.stringify([null, JSON.stringify(variants[v])]);
+
+                  if (session.fromBrowser && geminiBrowserPage && !geminiBrowserPage.isClosed()) {
+                    const browserRes = await geminiBrowserPage.evaluate(async ({ bl, fSid, authUser, at, reqId, fReq }) => {
+                      const qp = new URLSearchParams({ bl, hl: 'en', _reqid: String(reqId), rt: 'c', authuser: String(authUser) });
+                      if (fSid) qp.set('f.sid', fSid);
+                      const endpoint = `/u/${authUser}/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate?${qp.toString()}`;
+                      const form = new URLSearchParams();
+                      form.set('f.req', fReq);
+                      form.set('at', at);
+                      const r = await fetch(endpoint, {
+                        method: 'POST',
+                        credentials: 'include',
+                        headers: {
+                          'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+                          'X-Same-Domain': '1'
+                        },
+                        body: form.toString()
+                      });
+                      return { ok: r.ok, status: r.status, text: await r.text() };
+                    }, { bl: session.bl, fSid: session.fSid, authUser: session.authUser, at: session.at, reqId, fReq });
+
+                    if (browserRes.status === 401 || browserRes.status === 403 || browserRes.status === 400) {
+                      console.warn(`  In-browser StreamGenerate HTTP ${browserRes.status} — reloading live Gemini tab...`);
+                      session = await getGeminiSession(true);
+                      continue;
+                    }
+                    if (!browserRes.ok) {
+                      lastErr = `Browser HTTP ${browserRes.status}`;
+                      continue;
+                    }
+                    const textOut = parseStreamGenerateResponse(browserRes.text);
+                    if (textOut && textOut.length > 0) {
+                      console.log(`  Got Live Browser Gemini response (${textOut.length} chars)`);
+                      return textOut;
+                    }
+                    lastErr = 'Empty assistant text in live browser response';
+                    continue;
+                  }
+
                   const doPost = async (sess) => {
-                    const qp = new URLSearchParams({
-                      bl: sess.bl,
-                      hl: 'en',
-                      _reqid: String(reqId),
-                      rt: 'c',
-                      authuser: String(sess.authUser)
-                    });
+                    const qp = new URLSearchParams({ bl: sess.bl, hl: 'en', _reqid: String(reqId), rt: 'c', authuser: String(sess.authUser) });
                     if (sess.fSid) qp.set('f.sid', sess.fSid);
                     const endpoint = `https://gemini.google.com/u/${sess.authUser}/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate?${qp.toString()}`;
                     const form = new URLSearchParams();
-                    form.set('f.req', JSON.stringify([null, JSON.stringify(variants[v])]));
+                    form.set('f.req', fReq);
                     form.set('at', sess.at);
                     return fetchWithTimeout(endpoint, {
                       method: 'POST',
@@ -3019,20 +3227,17 @@ jobs:
 
                   let resp = await doPost(session);
                   if (resp.status === 401 || resp.status === 403 || resp.status === 400) {
-                    console.warn(`  StreamGenerate HTTP ${resp.status} — refreshing session token and retrying...`);
                     session = await getGeminiSession(true);
                     resp = await doPost(session);
                   }
-
                   if (!resp.ok) {
                     lastErr = `HTTP ${resp.status}`;
                     continue;
                   }
-
-                  const text = parseStreamGenerateResponse(await resp.text());
-                  if (text && text.length > 0) {
-                    console.log(`  Got Gemini RPC response (${text.length} chars)`);
-                    return text;
+                  const textOut = parseStreamGenerateResponse(await resp.text());
+                  if (textOut && textOut.length > 0) {
+                    console.log(`  Got Gemini RPC response (${textOut.length} chars)`);
+                    return textOut;
                   }
                   lastErr = 'Empty assistant text in StreamGenerate response';
                 } catch (e) {
@@ -3042,25 +3247,6 @@ jobs:
               }
             }
             throw new Error(`Gemini RPC failed: ${lastErr}`);
-          }
-
-          // ─── FIREBASE & R2 ROUTING ─────────────────────────────────────────────────
-          const FIREBASE_DB_MAP = Object.fromEntries(Object.entries({
-            zedge_1: process.env.ZEDGE1_DB_URL,
-            zedge_2: process.env.ZEDGE2_DB_URL,
-            zedge_3: process.env.ZEDGE3_DB_URL,
-            zedge_4: process.env.ZEDGE4_DB_URL
-          }).filter(([, u]) => u && u.trim()).map(([k, u]) => [k, u.trim().replace(/\/+$/, '')]));
-
-          if (!Object.keys(FIREBASE_DB_MAP).length) {
-            console.error('No ZEDGEn_DB_URL GitHub secret is set.');
-            process.exit(1);
-          }
-
-          const R2_WORKER_URL = (process.env.R2_WORKER_URL || '').trim().replace(/\/+$/, '');
-          if (!R2_WORKER_URL) {
-            console.error('GitHub secret R2_WORKER_URL is missing.');
-            process.exit(1);
           }
 
           function resolveTargetDbs(accountStr) {
@@ -3263,7 +3449,7 @@ jobs:
             lengthSeconds: INITIAL_LENGTH_SEC,
             targetAccount: INITIAL_TARGET_ACC,
             useGeminiEnhancer: true,
-            bpm: 'Auto',
+            bpm: 120,
             instruments: 'Auto',
             genre: 'Auto',
             mood: 'Auto',
@@ -3271,7 +3457,7 @@ jobs:
             structure: 'Auto',
             production: 'crisp modern studio mastered production with clear mids',
             autoProcess: INITIAL_AUTO_PROCESS,
-            trimSilence: false,
+            trimSilence: true,
             volumeBoostPct: INITIAL_BOOST_PCT,
             silenceThreshold: INITIAL_SILENCE_THR,
             padMs: INITIAL_PAD_MS,
@@ -3334,7 +3520,7 @@ jobs:
             const asmr = ['Keyboard Typing', 'Paper Turning Pages', 'Rain on Window', 'Whispering Voice', 'Sand Pouring', 'Crunching Leaves', 'Hair Brushing', 'Soft Tapping', 'Coffee Brewing', 'Crackling Fireplace'];
             const epic = ['Orchestral Battle March', 'Choir of Warriors', 'Dragon Theme', 'Kingdom Rising', 'Final Boss Theme', 'Hero Transformation', 'Galaxy Explosion', 'Ancient Gods Awakening', 'Legendary Sword Unsheathing', 'Apocalypse Dawn'];
             const urban = ['City Traffic Jazz', 'Subway Beat', 'Hip-Hop Street', 'Breakbeat Alley', 'Night Club Bass', 'Graffiti Art Funk', 'Skyscraper Wind', 'Street Vendor Rhythm', 'Neon Market', 'Urban Jungle Groove'];
-            const structures = ['a catchy 3-note hook that repeats once and resolves', 'a rising build that peaks into a bright memorable motif', 'a call-and-response between two contrasting sounds', 'a seamless loop with a satisfying rhythmic groove', 'a gentle intro that blooms into a rich melodic phrase', 'a punchy opening with a sparkling, slowly fading tail', 'a playful question-answer melody that ends on a high note', 'a hypnotic repeating figure with one surprising accent'];
+            const structures = ['a catchy 3-note hook that repeats continuously', 'a rising build that stays full and bright through the entire track', 'a lively call-and-response between two contrasting instruments', 'a tight seamless loop with a steady rhythmic groove from start to end', 'an immediate melodic intro that stays energetic all the way through', 'a punchy repeating motif with full sustained energy', 'a playful question-answer melody with continuous rhythm', 'a hypnotic repeating groove with crisp accents throughout'];
             const productions = ['warm analog studio polish', 'crisp modern cinematic production', 'intimate close-mic organic recording', 'lush layered stereo depth', 'punchy radio-ready mix', 'airy minimalist production with real room ambience'];
             const tempos = ['90 BPM relaxed groove', '108 BPM mid-tempo groove', '120 BPM upbeat and bouncy', '128 BPM energetic pulse', '80 BPM slow and spacious'];
 
@@ -3380,7 +3566,8 @@ jobs:
                 `- The melodic hook must be instantly recognizable within the FIRST 2 SECONDS.\n` +
                 `- Clear, musical melody at ${chosenBpm} featuring ${chosenInst} in ${chosenKey}.\n` +
                 `- ZERO IMITATION: Never imitate stock phone ringtones from Apple, Samsung, Nokia, or Motorola.\n` +
-                `- Must loop cleanly and cut through on a phone speaker (strong clear mids, crisp highs, no muddy sub-bass).`;
+                `- CRITICAL FULL DURATION: Music MUST start immediately at 0.0s and stay active continuously for the ENTIRE ${durSec}s — NO silent intro, NO early fade-out, NO trailing silence.\n` +
+                `- Must cut through on a phone speaker (strong clear mids, crisp highs, no muddy sub-bass).`;
 
             const RENDERER_RULES = `AUDIO RENDERER FACTS (the ENHANCED_PROMPT is sent to Stable Audio 2.5 text-to-music model for ${durSec}s):\n` +
               `- Renders musical instruments, genres, rhythm, BPM, harmony, and studio textures with high fidelity.\n` +
@@ -3490,81 +3677,130 @@ jobs:
             const recentTitles = RECENT_CONCEPTS.map(c => c.split(' — ')[0]).filter(Boolean);
 
             const normalizeKey = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+            const wordsOf = (s) => normalizeKey(s).split(' ').filter(w => w.length > 2);
             const tagListOf = (s) => String(s || '').split(',').map(w => w.trim().toLowerCase()).filter(Boolean);
-            const tagOverlapRatio = (a, b) => {
-              const sa = new Set(tagListOf(a));
-              const sb = new Set(tagListOf(b));
-              if (!sa.size || !sb.size) return 0;
-              let common = 0;
-              for (const x of sa) if (sb.has(x)) common++;
-              return common / Math.max(sa.size, sb.size);
-            };
+
+            // Distinct curated vocabulary banks so every take gets genuinely different tags & short descriptions
+            const FRESH_TAG_BANKS = [
+              ['melodic', 'harmonic', 'crisp', 'bright', 'mellow', 'rhythmic', 'acoustic', 'lush', 'clean', 'vivid', 'smooth', 'uplifting'],
+              ['groovy', 'warm', 'airy', 'punchy', 'sparkling', 'dreamy', 'organic', 'velvet', 'bouncy', 'gentle', 'golden', 'radiant'],
+              ['cinematic', 'dramatic', 'deep', 'moody', 'mystic', 'shadowy', 'intense', 'bold', 'epic', 'resonant', 'dark', 'haunting'],
+              ['playful', 'cheery', 'breezy', 'fresh', 'sunny', 'lively', 'quirky', 'sweet', 'snappy', 'light', 'joyful', 'zippy']
+            ];
 
             const results = [firstClean];
             const usedTitles = new Set([normalizeKey(firstClean.title), ...recentTitles.map(normalizeKey)]);
             const usedDescs  = new Set([normalizeKey(firstClean.description)]);
+            const usedDescWords = new Set(wordsOf(firstClean.description));
+            const usedTagCounts = new Map();
+            for (const t of tagListOf(firstClean.tags)) usedTagCounts.set(t, 1);
 
-            const needCount = totalTakes - 1;
+            const enforceDistinctTags = (rawTagsStr, takeIdx, category) => {
+              const catTag = String(category || '').toLowerCase().replace(/[^a-z]/g, '');
+              const incoming = tagListOf(rawTagsStr);
+              const picked = [];
+              // First take tags that haven't been used in any earlier take
+              for (const w of incoming) {
+                if (picked.length >= 10) break;
+                if (!usedTagCounts.has(w) && !picked.includes(w)) picked.push(w);
+              }
+              // Allow at most 2 shared core tags (like primary instrument/genre)
+              let sharedAdded = 0;
+              for (const w of incoming) {
+                if (picked.length >= 10 || sharedAdded >= 2) break;
+                if (!picked.includes(w)) { picked.push(w); sharedAdded++; }
+              }
+              // Top up to 8-10 tags with fresh unused descriptors from distinct bank
+              const bank = [...FRESH_TAG_BANKS[takeIdx % FRESH_TAG_BANKS.length], ...FRESH_TAG_BANKS[(takeIdx + 1) % FRESH_TAG_BANKS.length]]
+                .sort(() => Math.random() - 0.5);
+              for (const w of bank) {
+                if (picked.length >= 9) break;
+                if (!picked.includes(w) && !usedTagCounts.has(w)) picked.push(w);
+              }
+              if (catTag && catTag !== 'other' && !picked.includes(catTag) && picked.length < 10) {
+                picked.unshift(catTag);
+              }
+              const finalArr = picked.slice(0, 10);
+              for (const w of finalArr) usedTagCounts.set(w, (usedTagCounts.get(w) || 0) + 1);
+              return finalArr.join(', ');
+            };
+
+            const isDescTooSimilar = (desc) => {
+              const norm = normalizeKey(desc);
+              if (!norm || usedDescs.has(norm)) return true;
+              const ws = wordsOf(desc);
+              const shared = ws.filter(w => usedDescWords.has(w)).length;
+              return ws.length > 0 && shared >= Math.max(2, ws.length);
+            };
 
             for (let attempt = 1; attempt <= 3 && results.length < totalTakes; attempt++) {
               const remaining = totalTakes - results.length;
               const avoidTitlesList = [...usedTitles].slice(-12).join(', ');
               const avoidDescsList  = [...usedDescs].slice(-8).join(', ');
-              const existingTags    = results.map(r => r.tags).join(' | ');
+              const avoidTagsList   = [...usedTagCounts.keys()].slice(0, 28).join(', ');
 
               const multiPrompt = [
                 'You are a Zedge marketplace audio metadata expert.',
-                `We generated ${totalTakes} separate audio variations from one musical concept. Zedge PERMANENTLY SUSPENDS accounts if uploads have duplicate/similar titles, numbered suffixes (V1, V2, V3, V4, #1, Take 1, Part 1, Mix 1), identical tag lists, or repetitive descriptions.`,
+                `We generated ${totalTakes} separate audio variations. Zedge SUSPENDS accounts if uploads share titles, numbered suffixes (V1/V2/V3/V4/#1/Take 1), similar tag lists, or similar descriptions.`,
                 '',
                 ZEDGE_POLICY_RULES,
                 '',
                 'AUDIO CONCEPT:',
                 `- Prompt: ${baseMeta.enhancedPrompt}`,
                 `- Shape: ${shape} | Key: ${musicalKey} | Primary Category: ${baseMeta.category}`,
-                `- Already used titles (DO NOT repeat or share main words with these): ${avoidTitlesList}`,
-                `- Already used descriptions (DO NOT repeat): ${avoidDescsList}`,
-                `- Already used tag sets (use fresh, different descriptive synonyms/moods/angles): ${existingTags}`,
+                `- ALREADY USED TITLES (ZERO overlap allowed): ${avoidTitlesList}`,
+                `- ALREADY USED DESCRIPTIONS (ZERO overlap allowed): ${avoidDescsList}`,
+                `- ALREADY USED TAGS (AVOID repeating these — invent fresh synonyms, moods, textures, instruments): ${avoidTagsList}`,
                 '',
-                'TASK:',
-                `Create ${remaining} COMPLETELY DISTINCT, standalone Zedge metadata sets for the remaining ${remaining} audio tracks.`,
-                'RULES FOR EVERY SET:',
-                `1. TITLE: 100% unique creative 2-3 word title (max 25 chars). ZERO numbers, ZERO V1/V2/V3/V4, ZERO "Mix/Take/Version/Alt/Part/Loop". Do NOT use banned words: ${bannedWords}.`,
-                '2. KEYWORDS: 8-10 descriptive SINGLE-WORD tags (comma-separated) tailored to this variation using fresh vocabulary (at least half the words must differ from the other takes).',
-                `3. CATEGORY: Pick ONE from: ${validCategories}.`,
-                '4. DESCRIPTION: ULTRA-SHORT, EXACTLY 2 TO 3 WORDS (max 25 chars), no punctuation, completely unique wording.',
+                `TASK: Return ONLY a valid JSON array with EXACTLY ${remaining} objects. Each object MUST have completely different "title", "keywords", "category", and "description":`,
+                `- "title": Unique creative 2-3 word title (max 25 chars). NO numbers, NO V1/V2/V3/V4, NO banned words (${bannedWords}).`,
+                '- "keywords": 8-10 SINGLE-WORD comma-separated tags that are DIFFERENT from the already used tags above.',
+                `- "category": ONE exact value from: ${validCategories}.`,
+                '- "description": ULTRA-SHORT, EXACTLY 2 TO 3 WORDS (max 24 chars), no punctuation, completely different wording from all other descriptions.',
                 '',
-                'Respond ONLY in this exact format:',
-                ...Array.from({ length: remaining }, (_, idx) => {
-                  const n = idx + 1;
-                  return `[SET_${n}]\n[TITLE]...[/TITLE]\n[KEYWORDS]...[/KEYWORDS]\n[CATEGORY]...[/CATEGORY]\n[DESCRIPTION]...[/DESCRIPTION]\n[/SET_${n}]`;
-                })
+                'Output ONLY the raw JSON array, e.g.: [{"title":"...","keywords":"w1, w2, ...","category":"...","description":"..."}]'
               ].join('\n');
 
               try {
                 const rawReply = await callGeminiRpc(multiPrompt);
-                const extractField = (block, tag) => {
-                  const re = new RegExp(`\\[\\s*${tag}\\s*\\]\\s*:?([\\s\\S]*?)(?:\\[\\s*\\/\\s*${tag}\\s*\\]|(?=\\[\\s*(?:TITLE|KEYWORDS|CATEGORY|DESCRIPTION|\\/SET_)\\s*\\])|$)`, 'i');
-                  const m = block.match(re);
-                  return m ? m[1].replace(/\*\*/g, '').replace(/^`+|`+$/g, '').trim() : '';
-                };
+                let parsedItems = [];
 
-                const setBlocks = [];
-                for (let n = 1; n <= remaining; n++) {
-                  const m = rawReply.match(new RegExp(`\\[\\s*SET_${n}\\s*\\]([\\s\\S]*?)(?:\\[\\s*\\/\\s*SET_${n}\\s*\\]|(?=\\[\\s*SET_${n + 1}\\s*\\])|$)`, 'i'));
-                  if (m && m[1]) setBlocks.push(m[1]);
+                // Primary parse: JSON array
+                const jsonMatch = rawReply.match(/\[\s*\{[\s\S]*?\}\s*\]/);
+                if (jsonMatch) {
+                  try {
+                    const arr = JSON.parse(jsonMatch[0]);
+                    if (Array.isArray(arr)) parsedItems = arr;
+                  } catch {}
                 }
 
-                for (const block of setBlocks) {
+                // Secondary fallback parse: [SET_N] or tagged blocks
+                if (!parsedItems.length) {
+                  const blocks = rawReply.split(/\[\s*SET_\d+\s*\]/i).slice(1);
+                  for (const b of blocks) {
+                    const getF = (tag) => {
+                      const m = b.match(new RegExp(`\\[\\s*${tag}\\s*\\]\\s*:?([\\s\\S]*?)(?:\\[\\s*\\/\\s*${tag}\\s*\\]|\\[|$)`, 'i'));
+                      return m ? m[1].trim() : '';
+                    };
+                    parsedItems.push({
+                      title: getF('TITLE'),
+                      keywords: getF('KEYWORDS'),
+                      category: getF('CATEGORY'),
+                      description: getF('DESCRIPTION')
+                    });
+                  }
+                }
+
+                for (const item of parsedItems) {
                   if (results.length >= totalTakes) break;
-                  const tTitle = cleanTitle(extractField(block, 'TITLE'));
-                  const tTags  = cleanKeywords(extractField(block, 'KEYWORDS'));
-                  const tCat   = cleanCategory(extractField(block, 'CATEGORY') || baseMeta.category);
-                  const tDesc  = cleanDescription(extractField(block, 'DESCRIPTION'));
+                  const tTitle = cleanTitle(item?.title || '');
+                  const tTags  = cleanKeywords(Array.isArray(item?.keywords) ? item.keywords.join(', ') : (item?.keywords || item?.tags || ''));
+                  const tCat   = cleanCategory(item?.category || baseMeta.category);
+                  const tDesc  = cleanDescription(item?.description || '');
                   if (!tTitle || tTitle.length < 3 || !tTags || !tDesc) continue;
 
                   const normT = normalizeKey(tTitle);
-                  const normD = normalizeKey(tDesc);
-                  if (usedTitles.has(normT) || usedDescs.has(normD)) continue;
+                  if (usedTitles.has(normT) || isDescTooSimilar(tDesc)) continue;
 
                   const checked = zedgeEnforce({
                     enhancedPrompt: baseMeta.enhancedPrompt,
@@ -3575,18 +3811,11 @@ jobs:
                   }, 'audio');
                   if (checked.issues.length) continue;
 
-                  // Ensure tag set isn't near-identical to an earlier take
-                  let finalTagsStr = checked.meta.tags;
-                  if (results.some(prev => tagOverlapRatio(prev.tags, finalTagsStr) > 0.7)) {
-                    const extras = ['melodic', 'crisp', 'warm', 'bright', 'smooth', 'rhythmic', 'harmonic', 'acoustic', 'lush', 'clean', 'deep', 'vivid', 'mellow', 'punchy', 'fresh', 'rich'];
-                    const cur = tagListOf(finalTagsStr);
-                    const freshExtras = extras.filter(w => !cur.includes(w)).sort(() => Math.random() - 0.5).slice(0, 4);
-                    finalTagsStr = [...cur.slice(0, 6), ...freshExtras].slice(0, 10).join(', ');
-                  }
-
-                  const finalTakeMeta = { ...checked.meta, tags: finalTagsStr };
+                  const distinctTags = enforceDistinctTags(checked.meta.tags, results.length, checked.meta.category);
+                  const finalTakeMeta = { ...checked.meta, tags: distinctTags };
                   usedTitles.add(normT);
-                  usedDescs.add(normD);
+                  usedDescs.add(normalizeKey(finalTakeMeta.description));
+                  wordsOf(finalTakeMeta.description).forEach(w => usedDescWords.add(w));
                   rememberConcept(finalTakeMeta.title, baseMeta.enhancedPrompt);
                   results.push(finalTakeMeta);
                 }
@@ -3595,16 +3824,19 @@ jobs:
               }
             }
 
-            // Deterministic zero-V1/V2 fallback if any slot still missing
-            const fallbackAdjs   = ['Velvet', 'Golden', 'Silver', 'Amber', 'Crimson', 'Cobalt', 'Misty', 'Solar', 'Lunar', 'Coral', 'Ivory', 'Emerald', 'Saffron', 'Indigo'];
-            const fallbackNouns  = ['Horizon', 'Breeze', 'Cascade', 'Mirage', 'Meadow', 'Lantern', 'Ripple', 'Drift', 'Bloom', 'Spark', 'Cadence', 'Whisper', 'Glimmer', 'Chime'];
-            const fallbackMoods  = ['Warm', 'Crisp', 'Bright', 'Smooth', 'Gentle', 'Lively', 'Mellow', 'Rich', 'Airy', 'Bold'];
-            const fallbackForms  = ['melody', 'groove', 'motif', 'chime', 'pluck', 'cadence', 'harmony', 'rhythm'];
-            const fallbackTagPool = ['melodic', 'acoustic', 'warm', 'crisp', 'smooth', 'bright', 'harmonic', 'rhythmic', 'lush', 'mellow', 'clean', 'vivid', 'rich', 'gentle', 'airy', 'punchy', 'fresh', 'deep', 'uplifting', 'calm'];
+            // Deterministic zero-duplicate fallback if any slot still missing
+            const fallbackAdjs  = ['Velvet', 'Golden', 'Silver', 'Amber', 'Crimson', 'Cobalt', 'Misty', 'Solar', 'Lunar', 'Coral', 'Ivory', 'Emerald', 'Saffron', 'Indigo', 'Obsidian', 'Scarlet'];
+            const fallbackNouns = ['Horizon', 'Breeze', 'Cascade', 'Mirage', 'Meadow', 'Lantern', 'Ripple', 'Drift', 'Bloom', 'Spark', 'Cadence', 'Whisper', 'Glimmer', 'Chime', 'Prism', 'Ember'];
+            const fallbackDescPairs = [
+              'Warm melodic motif', 'Crisp rhythmic groove', 'Lush acoustic harmony', 'Bright gentle cadence',
+              'Smooth midnight pulse', 'Airy sunlit chime', 'Deep resonant pluck', 'Lively modern tune',
+              'Soft dreamy phrase', 'Bold vibrant rhythm', 'Calm twilight tone', 'Fresh punchy hook'
+            ];
 
             while (results.length < totalTakes) {
+              const slotIdx = results.length;
               let fbTitle = '';
-              for (let tries = 0; tries < 25; tries++) {
+              for (let tries = 0; tries < 30; tries++) {
                 const a = fallbackAdjs[Math.floor(Math.random() * fallbackAdjs.length)];
                 const n = fallbackNouns[Math.floor(Math.random() * fallbackNouns.length)];
                 const cand = `${a} ${n}`;
@@ -3613,30 +3845,31 @@ jobs:
               if (!fbTitle) fbTitle = `Studio Motif ${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
 
               let fbDesc = '';
-              for (let tries = 0; tries < 25; tries++) {
-                const m = fallbackMoods[Math.floor(Math.random() * fallbackMoods.length)];
-                const f = fallbackForms[Math.floor(Math.random() * fallbackForms.length)];
-                const cand = cleanDescription(`${m} ${shape === 'oneshot' ? 'alert' : shape} ${f}`);
-                if (!usedDescs.has(normalizeKey(cand))) { fbDesc = cand; break; }
+              for (const candRaw of [...fallbackDescPairs].sort(() => Math.random() - 0.5)) {
+                const cand = cleanDescription(candRaw);
+                if (!isDescTooSimilar(cand)) { fbDesc = cand; break; }
               }
               if (!fbDesc) fbDesc = cleanDescription(fbTitle);
 
-              const baseTags = tagListOf(firstClean.tags).slice(0, 3);
-              const freshPool = [...fallbackTagPool].sort(() => Math.random() - 0.5).filter(w => !baseTags.includes(w)).slice(0, 6);
+              const distinctTags = enforceDistinctTags(FRESH_TAG_BANKS[slotIdx % FRESH_TAG_BANKS.length].join(', '), slotIdx, baseMeta.category);
               const checked = zedgeEnforce({
                 enhancedPrompt: baseMeta.enhancedPrompt,
                 title: fbTitle,
-                tags: [...baseTags, ...freshPool].join(', '),
+                tags: distinctTags,
                 category: baseMeta.category,
                 description: fbDesc
               }, 'audio');
 
               usedTitles.add(normalizeKey(checked.meta.title));
               usedDescs.add(normalizeKey(checked.meta.description));
+              wordsOf(checked.meta.description).forEach(w => usedDescWords.add(w));
               rememberConcept(checked.meta.title, baseMeta.enhancedPrompt);
               results.push(checked.meta);
             }
 
+            results.forEach((m, idx) => {
+              console.log(`    [Take ${idx + 1}/${results.length}] Title: "${m.title}" | Desc: "${m.description}" | Tags: ${m.tags}`);
+            });
             return results;
           }
 
@@ -3908,6 +4141,8 @@ jobs:
                 }
 
                 let capturedToken = null;
+                let capturedRefreshToken = null;
+                let capturedClientId = null;
                 const page = context.pages()[0] || await context.newPage();
 
                 // ── Node-side Network Interception (100% invisible to WorkOS Radar) ──
@@ -3919,6 +4154,13 @@ jobs:
                       capturedToken = tok;
                       console.log(`  🔑 Token captured from outgoing request (${req.url().slice(0, 60)})!`);
                     }
+                  }
+                  if (req.url().includes('api.workos.com/user_management/authenticate')) {
+                    try {
+                      const body = JSON.parse(req.postData() || '{}');
+                      if (body.client_id) capturedClientId = body.client_id;
+                      if (body.refresh_token && !capturedRefreshToken) capturedRefreshToken = body.refresh_token;
+                    } catch {}
                   }
                 });
 
@@ -3948,6 +4190,12 @@ jobs:
                           capturedToken = tok;
                           console.log(`  🔑 Token captured from auth response (${url.slice(0, 60)})!`);
                         }
+                        if (json?.refresh_token && typeof json.refresh_token === 'string') {
+                          capturedRefreshToken = json.refresh_token;
+                          currentRefreshToken = json.refresh_token;
+                          console.log(`  🔄 WorkOS refresh_token captured (no 5-min re-signup needed)!`);
+                        }
+                        if (capturedClientId) currentWorkosClientId = capturedClientId;
                       }
                     }
                   } catch {}
@@ -4312,10 +4560,116 @@ jobs:
           }
 
 
-          // ─── STABLE AUDIO SESSIONS / WIZARD API (4 PARALLEL TRACKS, LOOP, ONE-SHOT, SCALE) ──
+          // ─── STABLE AUDIO SESSIONS / WIZARD API (WORKOS REFRESH + 50-CREDIT ROTATION) ──
           let currentToken = STABLE_AUDIO_TOKEN || null;
+          let currentRefreshToken = null;
+          let currentWorkosClientId = 'client_01M5FKRSSZMYNTGJZ7SF9WXKH6';
+          let currentCredits = { remaining: null, total: 50 };
           const STABLE_AUDIO_DEVICE_ID = crypto.randomUUID();
           const WIZARD_API_BASE = 'https://sessions-api.stableaudio.com/agents/wizard';
+
+          function getJwtExpSeconds(jwt) {
+            try {
+              const parts = String(jwt || '').split('.');
+              if (parts.length !== 3) return null;
+              const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+              return typeof payload.exp === 'number' ? payload.exp : null;
+            } catch {
+              return null;
+            }
+          }
+
+          async function refreshStableAudioToken() {
+            if (!currentRefreshToken) return false;
+            try {
+              console.log('  🔄 Refreshing Stable Audio access token via WorkOS refresh_token (keeping same 50-credit account)...');
+              const res = await fetchWithTimeout('https://api.workos.com/user_management/authenticate', {
+                method: 'POST',
+                headers: {
+                  'Accept': 'application/json, text/plain, */*',
+                  'Content-Type': 'application/json',
+                  'Origin': 'https://stableaudio.com',
+                  'Referer': 'https://stableaudio.com/'
+                },
+                body: JSON.stringify({
+                  client_id: currentWorkosClientId || 'client_01M5FKRSSZMYNTGJZ7SF9WXKH6',
+                  grant_type: 'refresh_token',
+                  refresh_token: currentRefreshToken
+                })
+              }, 30000);
+              if (!res.ok) {
+                console.warn(`  ⚠️ WorkOS token refresh failed (${res.status})`);
+                return false;
+              }
+              const data = await res.json();
+              if (data?.access_token) {
+                currentToken = data.access_token;
+                if (data.refresh_token) currentRefreshToken = data.refresh_token;
+                STUDIO_STATUS.stableAudioReady = true;
+                console.log('  ✅ Stable Audio token refreshed cleanly (same account kept)!');
+                return true;
+              }
+              return false;
+            } catch (e) {
+              console.warn(`  ⚠️ WorkOS refresh error: ${e.message}`);
+              return false;
+            }
+          }
+
+          async function fetchStableAudioCredits() {
+            if (!currentToken) return null;
+            try {
+              const res = await fetchWithTimeout('https://api.stableaudio.com/v1alpha/user/balance', {
+                headers: {
+                  'Accept': '*/*',
+                  'Authorization': `Bearer ${currentToken}`,
+                  'Origin': 'https://stableaudio.com',
+                  'Referer': 'https://stableaudio.com/'
+                }
+              }, 20000);
+              if (!res.ok) return null;
+              const txt = await res.text();
+              const data = JSON.parse(txt);
+              const attrs = data?.attributes || {};
+              const remaining = typeof attrs.generations_limit === 'number' ? attrs.generations_limit : null;
+              const total = typeof attrs.credits_per_period === 'number' ? attrs.credits_per_period : 50;
+              if (remaining !== null) {
+                currentCredits = { remaining, total };
+                STUDIO_STATUS.stableAudioCredits = currentCredits;
+              }
+              return currentCredits;
+            } catch {
+              return null;
+            }
+          }
+
+          async function ensureStableAudioTokenAndCredits(takesCount = 4) {
+            const exp = getJwtExpSeconds(currentToken);
+            if (currentToken && exp && (Date.now() / 1000) >= (exp - 45)) {
+              const refreshed = await refreshStableAudioToken();
+              if (!refreshed) {
+                console.warn('  JWT expired and refresh_token unavailable — rotating account...');
+                currentToken = await createStableAudioAccount();
+                STUDIO_STATUS.stableAudioReady = true;
+              }
+            }
+            if (!currentToken) {
+              currentToken = await createStableAudioAccount();
+              STUDIO_STATUS.stableAudioReady = true;
+            }
+            const neededCredits = Math.max(4, takesCount * 4);
+            const bal = await fetchStableAudioCredits();
+            if (bal && bal.remaining !== null) {
+              console.log(`  💳 Stable Audio Credits: ${bal.remaining}/${bal.total} remaining (need ~${neededCredits} for ${takesCount} track${takesCount === 1 ? '' : 's'})`);
+              if (bal.remaining < neededCredits) {
+                console.warn(`  💳 Credits low (${bal.remaining}/${bal.total} < ${neededCredits})! Auto-creating fresh 50-credit Stable Audio account...`);
+                currentRefreshToken = null;
+                currentToken = await createStableAudioAccount();
+                STUDIO_STATUS.stableAudioReady = true;
+                await fetchStableAudioCredits();
+              }
+            }
+          }
 
           function buildWizardHeaders(extra = {}) {
             return {
@@ -4332,14 +4686,25 @@ jobs:
             };
           }
 
+          function parseExplicitBpm(rawBpm) {
+            if (rawBpm == null || String(rawBpm).toLowerCase() === 'auto') return null;
+            const n = parseInt(String(rawBpm), 10);
+            return (Number.isFinite(n) && n >= 40 && n <= 240) ? n : null;
+          }
+
           function buildStableAudioPrompt(basePrompt, opts = {}) {
             let p = String(basePrompt || '').trim().replace(/\.+$/, '').trim();
             const shape = String(opts.audioShape || STUDIO_CONFIG.audioShape || 'track').toLowerCase();
             const key = String(opts.musicalKey || STUDIO_CONFIG.musicalKey || 'Auto').trim();
-            const bpm = opts.bpm ?? STUDIO_CONFIG.bpm;
+            const bpmNum = parseExplicitBpm(opts.bpm ?? STUDIO_CONFIG.bpm);
 
-            if (bpm && bpm !== 'Auto' && !/\bbpm\b/i.test(p)) {
-              p += `, ${bpm} BPM`;
+            // Force user's exact selected BPM (strip any conflicting BPM Gemini wrote)
+            if (bpmNum) {
+              p = p.replace(/,?\s*(?:at\s+)?\b\d{2,3}\s*bpm\b/gi, '').replace(/\s{2,}/g, ' ').replace(/,\s*,/g, ',').trim();
+              p += `, ${bpmNum} BPM`;
+            }
+            if (shape !== 'oneshot' && !/continuous|full length/i.test(p)) {
+              p += ', continuous full-length music with no silence';
             }
             if (shape === 'loop' && !/\bloop\b/i.test(p)) {
               p += ', loop';
@@ -4353,16 +4718,23 @@ jobs:
           }
 
           async function generateStableAudio(prompt, lengthSeconds, opts = {}, isRetry = false) {
-            const durSec = Math.max(1, Math.min(60, parseInt(lengthSeconds, 10) || 20));
+            const targetDurSec = Math.max(1, Math.min(60, parseInt(lengthSeconds, 10) || 20));
             const shape = String(opts.audioShape || STUDIO_CONFIG.audioShape || 'track').toLowerCase();
+            const trimEnabled = (opts.trimSilence ?? STUDIO_CONFIG.trimSilence ?? true) !== false;
+            // Request +4s extra buffer on tracks/loops >= 6s so after trimming trailing silence we still fill the exact target duration!
+            const requestDurSec = (trimEnabled && shape !== 'oneshot' && targetDurSec >= 6)
+              ? Math.min(60, targetDurSec + 4)
+              : targetDurSec;
+
             const musicalKey = String(opts.musicalKey || STUDIO_CONFIG.musicalKey || 'Auto').trim();
             const timeSignature = String(opts.timeSignature || STUDIO_CONFIG.timeSignature || '4/4').trim() || '4/4';
+            const bpmNum = parseExplicitBpm(opts.bpm ?? STUDIO_CONFIG.bpm);
             const takesCount = Math.max(1, Math.min(4, parseInt(opts.takesCount ?? STUDIO_CONFIG.takesCount ?? 4, 10) || 4));
             const baseSeed = (opts.seed != null && Number(opts.seed) >= 0)
               ? Math.floor(Number(opts.seed))
               : Math.floor(100000000 + Math.random() * 800000000);
 
-            const finalPrompt = buildStableAudioPrompt(prompt, { ...opts, audioShape: shape, musicalKey });
+            const finalPrompt = buildStableAudioPrompt(prompt, { ...opts, audioShape: shape, musicalKey, bpm: bpmNum ?? 'Auto' });
             const tracks = [];
             for (let i = 0; i < takesCount; i++) {
               const t = { generation_prompt: finalPrompt, seed: baseSeed + i };
@@ -4375,20 +4747,26 @@ jobs:
               tracks,
               time_signature: timeSignature
             };
+            if (bpmNum) {
+              plan.tempo = bpmNum;
+            }
             if (musicalKey && musicalKey !== 'Auto') {
               plan.key = musicalKey;
             }
 
             const payload = {
               plan,
-              duration_per_stem: durSec,
+              duration_per_stem: requestDurSec,
               output_format: 'wav',
               quality_preset: 'standard',
               apply_mix: false,
               generation_strategy: 'parallel_t2a'
             };
 
-            console.log(`  Calling Stable Audio Wizard API (${takesCount} tracks | ${durSec}s | shape: ${shape} | key: ${musicalKey} | meter: ${timeSignature} | baseSeed: ${baseSeed})...`);
+            if (!isRetry) {
+              await ensureStableAudioTokenAndCredits(takesCount);
+            }
+            console.log(`  Calling Stable Audio Wizard API (${takesCount} tracks | target: ${targetDurSec}s, req: ${requestDurSec}s | BPM: ${bpmNum || 'Auto'} | shape: ${shape} | key: ${musicalKey} | meter: ${timeSignature} | baseSeed: ${baseSeed})...`);
 
             const res = await fetchWithTimeout(
               `${WIZARD_API_BASE}/compose-from-plan`,
@@ -4423,11 +4801,25 @@ jobs:
                 ))
               );
 
-              if ((isAuthError || isLimitError) && !isRetry) {
-                console.warn(`  ${isAuthError ? 'Auth/Token error' : 'API limit/credits hit'} (${res.status})! Auto-creating new Stable Audio account...`);
+              if (isAuthError && !isRetry) {
+                const refreshed = await refreshStableAudioToken();
+                if (refreshed) {
+                  return generateStableAudio(prompt, targetDurSec, opts, true);
+                }
+                console.warn(`  Auth/Token error (${res.status}) & refresh unavailable! Auto-creating fresh 50-credit Stable Audio account...`);
+                currentRefreshToken = null;
                 currentToken = await createStableAudioAccount();
                 STUDIO_STATUS.stableAudioReady = true;
-                return generateStableAudio(prompt, durSec, opts, true);
+                await fetchStableAudioCredits();
+                return generateStableAudio(prompt, targetDurSec, opts, true);
+              }
+              if (isLimitError && !isRetry) {
+                console.warn(`  Credits/Quota exhausted (${res.status})! Auto-creating fresh 50-credit Stable Audio account...`);
+                currentRefreshToken = null;
+                currentToken = await createStableAudioAccount();
+                STUDIO_STATUS.stableAudioReady = true;
+                await fetchStableAudioCredits();
+                return generateStableAudio(prompt, targetDurSec, opts, true);
               }
               throw new Error(`Stable Audio Wizard API error (${res.status}): ${errText.slice(0, 260)}`);
             }
@@ -4437,8 +4829,8 @@ jobs:
             if (!jobId) {
               throw new Error(`Stable Audio Wizard returned no job_id: ${JSON.stringify(data).slice(0, 200)}`);
             }
-            console.log(`  Wizard job created: ${jobId} (expecting ${takesCount} stems of ${durSec}s)`);
-            return { jobId, baseSeed, finalPrompt, takesCount, durSec, shape, musicalKey, timeSignature };
+            console.log(`  Wizard job created: ${jobId} (expecting ${takesCount} stems, target ${targetDurSec}s / req ${requestDurSec}s)`);
+            return { jobId, baseSeed, finalPrompt, takesCount, durSec: targetDurSec, requestDurSec, bpm: bpmNum, shape, musicalKey, timeSignature };
           }
 
           async function pollStableAudioResult(jobId) {
@@ -4482,6 +4874,7 @@ jobs:
             if (!stems.length) {
               throw new Error('Wizard result returned 0 stems.');
             }
+            fetchStableAudioCredits().catch(() => {});
             return stems;
           }
 
@@ -4555,9 +4948,10 @@ jobs:
             const silenceThreshold = parseFloat(opts.silenceThreshold ?? STUDIO_CONFIG.silenceThreshold ?? 0.02);
             const padSec           = (parseInt(opts.padMs ?? STUDIO_CONFIG.padMs ?? 100, 10)) / 1000;
             const shape            = String(opts.audioShape || STUDIO_CONFIG.audioShape || 'track').toLowerCase();
-            const shouldTrim       = (opts.trimSilence ?? STUDIO_CONFIG.trimSilence ?? false) === true && shape !== 'loop';
-            const fadeInSec        = shape === 'loop' ? 0 : ((parseInt(opts.fadeInMs ?? STUDIO_CONFIG.fadeInMs ?? 0, 10)) / 1000);
-            const fadeOutSec       = shape === 'loop' ? 0 : ((parseInt(opts.fadeOutMs ?? STUDIO_CONFIG.fadeOutMs ?? 0, 10)) / 1000);
+            const targetDurSec     = Math.max(1, Math.min(60, parseInt(opts.lengthSeconds ?? STUDIO_CONFIG.lengthSeconds ?? 20, 10) || 20));
+            const shouldTrim       = (opts.trimSilence ?? STUDIO_CONFIG.trimSilence ?? true) !== false;
+            const fadeInSec        = shape === 'loop' ? 0.015 : ((parseInt(opts.fadeInMs ?? STUDIO_CONFIG.fadeInMs ?? 0, 10)) / 1000);
+            const fadeOutSec       = shape === 'loop' ? 0.025 : ((parseInt(opts.fadeOutMs ?? STUDIO_CONFIG.fadeOutMs ?? 0, 10)) / 1000);
             const bitrate          = opts.bitrate || STUDIO_CONFIG.bitrate || '192k';
 
             const tmpDir = '/tmp/ringtone_proc';
@@ -4578,19 +4972,20 @@ jobs:
 
               const chain = [];
               if (shouldTrim) {
+                // Trim dead silence from BOTH start and end, then cap cleanly to exact targetDurSec
                 chain.push(
                   `silenceremove=start_periods=1:start_threshold=${dbStr}:start_silence=${padSec}:detection=peak`,
                   `areverse`,
-                  `silenceremove=start_periods=1:start_threshold=${dbStr}:start_silence=${padSec}:detection=peak`
+                  `silenceremove=start_periods=1:start_threshold=${dbStr}:start_silence=${padSec}:detection=peak`,
+                  `areverse`,
+                  `atrim=0:${targetDurSec}`,
+                  `asetpts=PTS-STARTPTS`
                 );
-                if (fadeOutSec > 0.01) {
-                  chain.push(`afade=t=in:st=0:d=${fadeOutSec.toFixed(3)}`);
-                }
-                chain.push(`areverse`);
-              } else if (fadeOutSec > 0.01) {
+              }
+              if (fadeOutSec > 0.005) {
                 chain.push(`areverse`, `afade=t=in:st=0:d=${fadeOutSec.toFixed(3)}`, `areverse`);
               }
-              if (fadeInSec > 0.01) {
+              if (fadeInSec > 0.005) {
                 chain.push(`afade=t=in:st=0:d=${fadeInSec.toFixed(3)}`);
               }
               chain.push(
@@ -4687,6 +5082,27 @@ jobs:
             const data = await response.json();
             if (!data.url) throw new Error(`R2 worker response missing 'url' field`);
             return data.url;
+          }
+
+          async function deleteFromR2(fileUrl) {
+            const url = String(fileUrl || '').trim();
+            if (!url) return { ok: false, skipped: true, reason: 'missing_url' };
+            if (!R2_WORKER_URL) return { ok: false, skipped: true, reason: 'missing_worker_url' };
+            const isR2Url = url.includes('.r2.dev/') || url.startsWith(R2_WORKER_URL.replace(/\/+$/, ''));
+            if (!isR2Url) return { ok: false, skipped: true, reason: 'non_r2_url' };
+            const response = await fetchWithTimeout(R2_WORKER_URL, {
+              method: 'DELETE',
+              headers: {
+                'Content-Type': 'application/json',
+                'X-R2-Delete-Protocol': 'r2-delete-v1'
+              },
+              body: JSON.stringify({ url })
+            }, 15000);
+            const body = await response.json().catch(() => ({}));
+            if (!response.ok || body.ok !== true || body.absent !== true) {
+              throw new Error(body.error || `R2 delete failed (HTTP ${response.status})`);
+            }
+            return body;
           }
 
           function generateFilename(title, dbName) {
@@ -4823,7 +5239,7 @@ jobs:
               if (cfg.autoProcess !== false && FFMPEG) {
                 try {
                   STUDIO_STATUS.currentTask = `[${dbTarget.name}] Mastering Take ${takeNum}/${totalTakes} ("${takeTitle}") with FFmpeg DSP...`;
-                  const r = await autoProcessAudio(audioBuffer, cfg);
+                  const r = await autoProcessAudio(audioBuffer, { ...cfg, lengthSeconds: durSec });
                   audioBuffer = r.buffer;
                   processing = r.stats;
                   processed = true;
@@ -5132,7 +5548,7 @@ jobs:
                   structure: body.structure ?? STUDIO_CONFIG.structure,
                   production: body.production ?? STUDIO_CONFIG.production,
                   autoProcess: body.autoProcess !== false,
-                  trimSilence: body.trimSilence === true,
+                  trimSilence: body.trimSilence !== false,
                   volumeBoostPct: parseInt(body.volumeBoostPct || STUDIO_CONFIG.volumeBoostPct, 10),
                   silenceThreshold: parseFloat(body.silenceThreshold || STUDIO_CONFIG.silenceThreshold),
                   padMs: parseInt(body.padMs ?? STUDIO_CONFIG.padMs, 10),
@@ -5168,7 +5584,7 @@ jobs:
                   structure: body.structure ?? STUDIO_CONFIG.structure,
                   production: body.production ?? STUDIO_CONFIG.production,
                   autoProcess: body.autoProcess !== false,
-                  trimSilence: body.trimSilence === true,
+                  trimSilence: body.trimSilence !== false,
                   volumeBoostPct: parseInt(body.volumeBoostPct || STUDIO_CONFIG.volumeBoostPct, 10),
                   silenceThreshold: parseFloat(body.silenceThreshold || STUDIO_CONFIG.silenceThreshold),
                   padMs: parseInt(body.padMs ?? STUDIO_CONFIG.padMs, 10),
@@ -5203,6 +5619,37 @@ jobs:
                   ? body.keys
                   : (dbName && firebaseKey ? [{ dbName, key: firebaseKey }] : []);
 
+                const idx = STUDIO_AUDIOS.findIndex(a => a.id === id || (a.dbName === dbName && a.firebaseKey === firebaseKey));
+                let fileUrl = String(body.fileUrl || (idx !== -1 ? STUDIO_AUDIOS[idx].fileUrl : '') || '').trim();
+
+                if (!fileUrl) {
+                  for (const t of targets) {
+                    const dbUrl = FIREBASE_DB_MAP[t.dbName];
+                    if (dbUrl && t.key) {
+                      try {
+                        const r = await fetchWithTimeout(`${dbUrl}/${QUEUE_PATH}/${t.key}.json`, {}, 10000);
+                        if (r.ok) {
+                          const rec = await r.json().catch(() => null);
+                          if (rec && rec.fileUrl) { fileUrl = String(rec.fileUrl).trim(); break; }
+                        }
+                      } catch {}
+                    }
+                  }
+                }
+
+                let r2Deleted = false;
+                if (fileUrl) {
+                  const targetSet = new Set(targets.map(t => `${t.dbName}:${t.key}`));
+                  const stillShared = STUDIO_AUDIOS.some(a =>
+                    String(a.fileUrl || '').trim() === fileUrl && !targetSet.has(`${a.dbName}:${a.firebaseKey}`)
+                  );
+                  if (!stillShared) {
+                    const r2Res = await deleteFromR2(fileUrl);
+                    r2Deleted = !!(r2Res && r2Res.ok && r2Res.absent);
+                    if (r2Deleted) console.log(`  Deleted audio from R2 (${r2Res.key || fileUrl})`);
+                  }
+                }
+
                 for (const t of targets) {
                   const dbUrl = FIREBASE_DB_MAP[t.dbName];
                   if (dbUrl && t.key) {
@@ -5211,7 +5658,6 @@ jobs:
                   }
                 }
 
-                const idx = STUDIO_AUDIOS.findIndex(a => a.id === id || (a.dbName === dbName && a.firebaseKey === firebaseKey));
                 if (idx !== -1) STUDIO_AUDIOS.splice(idx, 1);
 
                 const safeId = String(id || '').replace(/[^a-zA-Z0-9_-]/g, '');
@@ -5219,7 +5665,117 @@ jobs:
                   try { fs.unlinkSync(path.join(AUDIO_CACHE_DIR, `${safeId}.mp3`)); } catch {}
                 }
 
-                return sendJson(res, 200, { ok: true });
+                return sendJson(res, 200, { ok: true, r2Deleted });
+              }
+
+              if (req.method === 'POST' && u.pathname === '/api/clean-r2-orphans') {
+                const body = await readJsonBody(req).catch(() => ({}));
+                const dryRun = body.dryRun !== false;
+                if (!R2_WORKER_URL) return sendJson(res, 400, { error: 'R2_WORKER_URL is not configured' });
+
+                // 1. Collect ALL active R2 keys across ALL configured Firebase queues
+                const activeKeys = new Set();
+                const dbsChecked = [];
+                const extractUrls = (val) => {
+                  if (!val) return;
+                  if (typeof val === 'string') {
+                    if (val.startsWith('http://') || val.startsWith('https://')) {
+                      try {
+                        const parsed = new URL(val);
+                        const k = decodeURIComponent(parsed.pathname.replace(/^\/+/, ''));
+                        if (k) activeKeys.add(k);
+                      } catch {}
+                    }
+                    return;
+                  }
+                  if (Array.isArray(val)) { for (const item of val) extractUrls(item); return; }
+                  if (typeof val === 'object') { for (const v of Object.values(val)) extractUrls(v); }
+                };
+
+                for (const [dbKey, dbUrl] of Object.entries(FIREBASE_DB_MAP)) {
+                  const r = await fetchWithTimeout(`${dbUrl}/${QUEUE_PATH}.json`, {}, 25000);
+                  if (!r.ok) {
+                    return sendJson(res, 502, { error: `Aborted: failed to read Firebase ${dbKey} (HTTP ${r.status})` });
+                  }
+                  const data = await r.json();
+                  extractUrls(data);
+                  dbsChecked.push(dbKey);
+                }
+                if (!dbsChecked.length) {
+                  return sendJson(res, 400, { error: 'No Firebase DBs configured — aborted for safety' });
+                }
+
+                // 2. Paginate R2 objects via worker.js (?action=list)
+                const allObjects = [];
+                let cursor = null;
+                let pages = 0;
+                do {
+                  const listUrl = new URL(R2_WORKER_URL);
+                  listUrl.searchParams.set('action', 'list');
+                  listUrl.searchParams.set('limit', '1000');
+                  if (cursor) listUrl.searchParams.set('cursor', cursor);
+                  const lr = await fetchWithTimeout(listUrl.toString(), {}, 20000);
+                  const ld = await lr.json().catch(() => ({}));
+                  if (!lr.ok || !Array.isArray(ld.objects)) {
+                    return sendJson(res, 502, { error: ld.error || 'R2 worker does not support ?action=list yet — deploy the updated worker.js first' });
+                  }
+                  allObjects.push(...ld.objects);
+                  cursor = ld.truncated && ld.cursor ? ld.cursor : null;
+                  pages++;
+                } while (cursor && pages < 50);
+
+                const orphans = allObjects.filter(o => o && o.key && !activeKeys.has(o.key));
+                const orphanBytes = orphans.reduce((s, o) => s + (Number(o.size) || 0), 0);
+                if (dryRun) {
+                  return sendJson(res, 200, {
+                    ok: true,
+                    dryRun: true,
+                    dbsChecked,
+                    totalR2: allObjects.length,
+                    activeKeysCount: activeKeys.size,
+                    orphanCount: orphans.length,
+                    orphanBytes,
+                    sampleKeys: orphans.slice(0, 12).map(o => o.key)
+                  });
+                }
+
+                // 3. Delete verified orphans via worker.js
+                let deletedCount = 0;
+                let deletedBytes = 0;
+                let failedCount = 0;
+                const queue = [...orphans];
+                const workers = Array.from({ length: Math.min(5, queue.length) }, async () => {
+                  while (queue.length) {
+                    const obj = queue.shift();
+                    try {
+                      const dr = await fetchWithTimeout(R2_WORKER_URL, {
+                        method: 'DELETE',
+                        headers: { 'X-File-Name': obj.key }
+                      }, 15000);
+                      const dd = await dr.json().catch(() => ({}));
+                      if (dr.ok && dd.ok && dd.absent) {
+                        deletedCount++;
+                        deletedBytes += Number(obj.size) || 0;
+                      } else {
+                        failedCount++;
+                      }
+                    } catch {
+                      failedCount++;
+                    }
+                  }
+                });
+                await Promise.all(workers);
+                console.log(`  R2 orphan cleanup: deleted ${deletedCount}/${orphans.length} (${(deletedBytes / 1048576).toFixed(2)} MB), failed ${failedCount}`);
+                return sendJson(res, 200, {
+                  ok: true,
+                  dryRun: false,
+                  dbsChecked,
+                  totalR2: allObjects.length,
+                  orphanCount: orphans.length,
+                  deletedCount,
+                  deletedBytes,
+                  failedCount
+                });
               }
 
               if (req.method === 'POST' && u.pathname === '/api/update-audio') {
@@ -5325,30 +5881,40 @@ jobs:
           console.log(`  Duration            : ${INITIAL_LENGTH_SEC}s`);
           console.log('============================================================\n');
 
-          // 1. Verify Gemini Web RPC session (instant HTTP bootstrap)
-          try {
-            const sess = await getGeminiSession(false);
-            STUDIO_STATUS.geminiReady = true;
-            STUDIO_STATUS.geminiUser = sess.authUser;
-          } catch (err) {
-            console.error(`Gemini RPC session bootstrap failed: ${err.message}`);
-            process.exit(1);
+          STUDIO_STATUS.geminiVncUrl = GEMINI_VNC_URL || '';
+          STUDIO_STATUS.stableAudioCredits = currentCredits;
+
+          // 1. Launch Live Persistent Gemini Browser on DISPLAY=:99 (noVNC tunnel — user logs into Gmail directly, no expiring cookies!)
+          await startGeminiLiveBrowser();
+          if (!STUDIO_STATUS.geminiReady && COOKIE_HEADER) {
+            try {
+              const sess = await getGeminiSession(false);
+              STUDIO_STATUS.geminiReady = true;
+              STUDIO_STATUS.geminiUser = sess.authUser;
+            } catch (err) {
+              console.warn(`Optional cookie bootstrap skipped (${err.message}) — sign in via Live Gemini Browser link!`);
+            }
+          }
+          if (!STUDIO_STATUS.geminiReady) {
+            console.log(`  ⏳ Waiting for you to log into Gmail inside the Live Gemini Browser: ${GEMINI_VNC_URL || '(noVNC port 6080)'}`);
           }
 
           // 2. Sync existing ringtones from Firebase so they are immediately playable/deletable in the UI
           await syncFirebaseRingtones();
 
-          // 3. Ensure Stable Audio token is ready
+          // 3. Ensure Stable Audio token & 50-credit balance are ready
           if (!currentToken) {
-            console.log('No STABLE_AUDIO_TOKEN provided — auto-creating Stable Audio account...');
+            console.log('No STABLE_AUDIO_TOKEN provided — auto-creating initial 50-credit Stable Audio account...');
             try {
               currentToken = await createStableAudioAccount();
               STUDIO_STATUS.stableAudioReady = true;
+              await fetchStableAudioCredits();
             } catch (err) {
               console.error(`Initial Stable Audio account creation failed: ${err.message}`);
             }
           } else {
             STUDIO_STATUS.stableAudioReady = true;
+            await fetchStableAudioCredits();
           }
 
           // 4. Run initial auto-generation batch if AUTO_GENERATE_COUNT > 0
