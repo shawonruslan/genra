@@ -1713,7 +1713,7 @@ jobs:
                     </div>
                     <div class="field-group">
                       <div class="field-label"><span>Fade Out (ms)</span></div>
-                      <input type="number" id="fadeOutMsInput" min="0" max="3000" value="180" />
+                      <input type="number" id="fadeOutMsInput" min="0" max="3000" value="350" />
                     </div>
                   </div>
 
@@ -2107,7 +2107,7 @@ jobs:
                   autoProcess: document.getElementById('autoProcessToggle').checked,
                   trimSilence: document.getElementById('trimSilenceToggle').checked,
                   volumeBoostPct: parseInt(document.getElementById('volumeBoostSlider').value, 10) || 200,
-                  silenceThreshold: parseFloat(document.getElementById('silenceSlider').value) || 0.02,
+                  silenceThreshold: parseFloat(document.getElementById('silenceSlider').value) || 0.004,
                   padMs: parseInt(document.getElementById('padMsInput').value, 10) || 100,
                   fadeInMs: parseInt(document.getElementById('fadeInMsInput').value, 10) || 0,
                   fadeOutMs: parseInt(document.getElementById('fadeOutMsInput').value, 10) || 0,
@@ -2537,11 +2537,16 @@ jobs:
                         ${tags.map(t => `<span class="tag-item">${escapeHtml(t)}</span>`).join('')}
                       </div>
 
-                      <div class="prompt-preview" title="Enhanced Audio Prompt">${escapeHtml(item.enhancedPrompt || item.prompt || '')}</div>
+                      <div style="font-size:12px; color:var(--text-main); background:rgba(16,185,129,0.08); border:1px solid rgba(16,185,129,0.22); border-radius:6px; padding:6px 10px; margin-bottom:6px; display:flex; align-items:center; justify-content:space-between; gap:8px;">
+                        <span><strong style="color:var(--accent); font-size:11px; text-transform:uppercase; letter-spacing:0.3px;">Zedge Desc:</strong> ${escapeHtml(item.description || '')}</span>
+                        ${item.audioSeed != null ? `<span style="font-size:11px; color:var(--text-muted); font-family:var(--font-mono);">Seed: ${item.audioSeed}</span>` : ''}
+                      </div>
+
+                      <div class="prompt-preview" title="Shared Stable Audio Generation Prompt"><span style="color:var(--text-muted); font-size:10px; text-transform:uppercase;">Audio Prompt: </span>${escapeHtml(item.enhancedPrompt || item.prompt || '')}</div>
 
                       <div class="card-actions">
                         <div style="font-size:11px; color:var(--text-muted); font-family:var(--font-mono);">
-                          ${escapeHtml(item.description || '')} ${item.audioSeed != null ? `| Seed: ${item.audioSeed}` : ''}
+                          ${item.takeIndex && item.takesTotal ? `Take ${item.takeIndex}/${item.takesTotal}` : ''}
                         </div>
                         <div style="display:flex; gap:6px;">
                           <button class="btn btn-ghost" onclick="openEditModal('${escapeHtml(item.id)}')" title="Edit Title, Tags & Category">
@@ -2785,8 +2790,8 @@ jobs:
           const INITIAL_LENGTH_SEC   = parseInt(process.env.LENGTH_SECONDS || '20', 10);
           const INITIAL_AUTO_PROCESS = process.env.AUTO_PROCESS !== 'false';
           const INITIAL_BOOST_PCT    = parseInt(process.env.VOLUME_BOOST_PCT || '200', 10);
-          const INITIAL_SILENCE_THR  = parseFloat(process.env.SILENCE_THRESHOLD || '0.02');
-          const INITIAL_PAD_MS       = parseInt(process.env.PAD_MS || '100', 10);
+          const INITIAL_SILENCE_THR  = parseFloat(process.env.SILENCE_THRESHOLD || '0.004');
+          const INITIAL_PAD_MS       = parseInt(process.env.PAD_MS || '150', 10);
           const STUDIO_PORT          = parseInt(process.env.STUDIO_PORT || '8787', 10);
           const STUDIO_MAX_MINUTES   = parseInt(process.env.STUDIO_MAX_MINUTES || '180', 10);
           const STUDIO_PASSWORD      = (process.env.STUDIO_PASSWORD || '').trim() || ('Studio-' + crypto.randomBytes(4).toString('hex'));
@@ -3500,7 +3505,7 @@ jobs:
             silenceThreshold: INITIAL_SILENCE_THR,
             padMs: INITIAL_PAD_MS,
             fadeInMs: 30,
-            fadeOutMs: 180,
+            fadeOutMs: 350,
             bitrate: '192k',
             seed: -1
           };
@@ -4760,8 +4765,8 @@ jobs:
             const shape = String(opts.audioShape || STUDIO_CONFIG.audioShape || 'track').toLowerCase();
             const trimEnabled = (opts.trimSilence ?? STUDIO_CONFIG.trimSilence ?? true) !== false;
             // Request +4s extra buffer on tracks/loops >= 6s so after trimming trailing silence we still fill the exact target duration!
-            const requestDurSec = (trimEnabled && shape !== 'oneshot' && targetDurSec >= 6)
-              ? Math.min(60, targetDurSec + 4)
+            const requestDurSec = (trimEnabled && shape === 'track' && targetDurSec >= 6)
+              ? Math.min(60, targetDurSec + 1)
               : targetDurSec;
 
             const musicalKey = String(opts.musicalKey || STUDIO_CONFIG.musicalKey || 'Auto').trim();
@@ -4983,13 +4988,14 @@ jobs:
           async function autoProcessAudio(inputBuffer, opts = {}) {
             if (!FFMPEG) throw new Error('ffmpeg binary not available');
             const gainFactor       = (parseInt(opts.volumeBoostPct ?? STUDIO_CONFIG.volumeBoostPct ?? 200, 10)) / 100;
-            const silenceThreshold = parseFloat(opts.silenceThreshold ?? STUDIO_CONFIG.silenceThreshold ?? 0.02);
-            const padSec           = (parseInt(opts.padMs ?? STUDIO_CONFIG.padMs ?? 100, 10)) / 1000;
+            const silenceThreshold = parseFloat(opts.silenceThreshold ?? STUDIO_CONFIG.silenceThreshold ?? 0.004);
+            const padSec           = (parseInt(opts.padMs ?? STUDIO_CONFIG.padMs ?? 150, 10)) / 1000;
             const shape            = String(opts.audioShape || STUDIO_CONFIG.audioShape || 'track').toLowerCase();
             const targetDurSec     = Math.max(1, Math.min(60, parseInt(opts.lengthSeconds ?? STUDIO_CONFIG.lengthSeconds ?? 20, 10) || 20));
             const shouldTrim       = (opts.trimSilence ?? STUDIO_CONFIG.trimSilence ?? true) !== false;
             const fadeInSec        = shape === 'loop' ? 0.015 : ((parseInt(opts.fadeInMs ?? STUDIO_CONFIG.fadeInMs ?? 0, 10)) / 1000);
-            const fadeOutSec       = shape === 'loop' ? 0.025 : ((parseInt(opts.fadeOutMs ?? STUDIO_CONFIG.fadeOutMs ?? 0, 10)) / 1000);
+            const rawFadeOutSec    = (parseInt(opts.fadeOutMs ?? STUDIO_CONFIG.fadeOutMs ?? 350, 10)) / 1000;
+            const fadeOutSec       = shape === 'loop' ? 0.025 : Math.max(0.25, rawFadeOutSec);
             const bitrate          = opts.bitrate || STUDIO_CONFIG.bitrate || '192k';
 
             const tmpDir = '/tmp/ringtone_proc';
