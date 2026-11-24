@@ -31,32 +31,31 @@ jobs:
         with:
           node-version: 20
 
-      - name: 📥 Install Dependencies & Cloudflared
+      - name: 📥 Install Dependencies & Cloudflared (Fast)
         run: |
           npm init -y
-          npm install node-fetch@3 fluent-ffmpeg @ffmpeg-installer/ffmpeg playwright patchright
-          npx patchright install chrome --with-deps || npx playwright install chromium --with-deps || true
+          npm install --no-audit --no-fund node-fetch@3 fluent-ffmpeg @ffmpeg-installer/ffmpeg patchright
+          if command -v google-chrome >/dev/null 2>&1 || command -v google-chrome-stable >/dev/null 2>&1; then
+            echo "✅ Using pre-installed system Google Chrome (skipped 150MB browser download)"
+          else
+            npx patchright install chrome || true
+          fi
           curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /usr/local/bin/cloudflared
           chmod +x /usr/local/bin/cloudflared
           cloudflared --version
 
-      - name: 🛡️ Start Cloudflare WARP SOCKS5 Proxy (Bypass WorkOS Datacenter IP Block)
+      - name: 🛡️ Start Cloudflare WARP SOCKS5 Proxy (Fast 7MB Binary — No apt/WebKit Bloat)
         continue-on-error: true
         run: |
-          curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
-          CODENAME=$(lsb_release -cs 2>/dev/null || echo "jammy")
-          echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ ${CODENAME} main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
-          sudo apt-get update -qq || (echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ jammy main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list && sudo apt-get update -qq)
-          sudo apt-get install -y --no-install-recommends cloudflare-warp
-          sudo warp-cli --accept-tos registration new || sudo warp-cli --accept-tos register || true
-          sudo warp-cli --accept-tos mode proxy || sudo warp-cli --accept-tos set-mode proxy || true
-          sudo warp-cli --accept-tos proxy port 40000 || sudo warp-cli --accept-tos set-proxy-port 40000 || true
-          sudo warp-cli --accept-tos connect || true
-          for i in 1 2 3 4 5; do
-            sleep 2
-            TRACE=$(curl -x socks5h://127.0.0.1:40000 -s --max-time 5 https://www.cloudflare.com/cdn-cgi/trace || true)
+          curl -fsSL https://github.com/bepass-org/warp-plus/releases/latest/download/warp-plus_linux-amd64.zip -o /tmp/warp-plus.zip
+          unzip -qo /tmp/warp-plus.zip -d /tmp/warp-plus-bin
+          chmod +x /tmp/warp-plus-bin/warp-plus
+          RUNNER_TRACKING_ID="" nohup /tmp/warp-plus-bin/warp-plus -b 127.0.0.1:40000 > /tmp/warp-plus.log 2>&1 </dev/null &
+          for i in $(seq 1 12); do
+            sleep 1
+            TRACE=$(curl -x socks5h://127.0.0.1:40000 -s --max-time 4 https://www.cloudflare.com/cdn-cgi/trace || true)
             if echo "$TRACE" | grep -q "warp=on\|warp=plus"; then
-              echo "✅ Cloudflare WARP proxy active on socks5://127.0.0.1:40000"
+              echo "✅ Cloudflare WARP SOCKS5 active in ${i}s on socks5://127.0.0.1:40000"
               echo "$TRACE" | grep -E "ip=|warp=|loc="
               echo "WARP_PROXY=socks5://127.0.0.1:40000" >> $GITHUB_ENV
               break
@@ -6027,20 +6026,27 @@ jobs:
         with:
           node-version: 20
 
-      - name: 📥 Install Dependencies & Live Browser Tools (for optional cookie-free login)
+      - name: 📥 Install Dependencies & Live Browser Tools (Fast)
         run: |
           npm init -y
-          npm install node-fetch@3 patchright
-          npx patchright install chrome --with-deps || npx playwright install chromium --with-deps || true
+          npm install --no-audit --no-fund node-fetch@3 patchright
+          if command -v google-chrome >/dev/null 2>&1 || command -v google-chrome-stable >/dev/null 2>&1; then
+            echo "✅ Using pre-installed system Google Chrome"
+          else
+            npx patchright install chrome || true
+          fi
           curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /usr/local/bin/cloudflared
           chmod +x /usr/local/bin/cloudflared
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends xvfb x11vnc openbox novnc websockify
-
-      - name: 🎬 Install ffmpeg (video frame extraction)
-        run: |
-          sudo apt-get install -y ffmpeg
-          echo "✅ ffmpeg ready (used only when a video record has no thumbUrl)"
+          NEED_PKGS=""
+          command -v Xvfb >/dev/null 2>&1 || NEED_PKGS="$NEED_PKGS xvfb"
+          command -v x11vnc >/dev/null 2>&1 || NEED_PKGS="$NEED_PKGS x11vnc"
+          command -v openbox >/dev/null 2>&1 || NEED_PKGS="$NEED_PKGS openbox"
+          [ -d /usr/share/novnc ] || NEED_PKGS="$NEED_PKGS novnc websockify"
+          command -v ffmpeg >/dev/null 2>&1 || NEED_PKGS="$NEED_PKGS ffmpeg"
+          if [ -n "$NEED_PKGS" ]; then
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends $NEED_PKGS
+          fi
 
       - name: 🖼️ Generate Image Metadata & Patch Firebase
         env:
